@@ -389,3 +389,64 @@ describe('integration — voice clone (5-27)', () => {
     expect(cj.status).toBe('PROCESSING')
   })
 })
+
+describe('integration — DNA lab (5-29)', () => {
+  test('không consent dna_processing → 422; nhập profile + matches + PATCH', async () => {
+    const cookie = await loginDemo()
+    await insertPersons([{ id: 'p-dna1', clan_id: 'clan-nguyen-dongngac', full_name: 'Cụ DNA', gender: 'M', is_alive: 0, created_by: 'user-tung' }])
+
+    // 1. Chưa consent → 422
+    const noConsent = await SELF.fetch(`${ORIGIN}/api/v1/persons/p-dna1/dna`, {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'myheritage', haplogroup: 'R1a1a' })
+    })
+    expect(noConsent.status).toBe(422)
+
+    // 2. Consent dna_processing
+    const cons = await SELF.fetch(`${ORIGIN}/api/v1/consent`, {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subjectPersonId: 'p-dna1', scope: ['dna_processing'], signatureMethod: 'NOTARY' })
+    })
+    expect(cons.status).toBe(200)
+
+    // 3. Tạo profile → 201; tạo lần 2 → 409
+    const created = await SELF.fetch(`${ORIGIN}/api/v1/persons/p-dna1/dna`, {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'myheritage', haplogroup: 'R1a1a', ethnicity: [{ label: 'Kinh', percentage: 92 }] })
+    })
+    expect(created.status).toBe(201)
+    const dup = await SELF.fetch(`${ORIGIN}/api/v1/persons/p-dna1/dna`, {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'myheritage' })
+    })
+    expect(dup.status).toBe(409)
+
+    // 4. Nhập matches
+    const match = await SELF.fetch(`${ORIGIN}/api/v1/persons/p-dna1/dna/matches`, {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ matches: [{ matchPersonName: 'Nguyễn Văn A', relationshipEstimate: 'Anh em họ', sharedCentiMorgans: 850 }] })
+    })
+    expect(match.status).toBe(200)
+    const mj = await match.json()
+    expect(mj.matches.length).toBe(1)
+
+    // 5. GET trả đủ dữ liệu
+    const got = await (await SELF.fetch(`${ORIGIN}/api/v1/persons/p-dna1/dna`, { headers: { cookie } })).json()
+    expect(got.dna.haplogroup).toBe('R1a1a')
+    expect(got.dna.ethnicity[0].label).toBe('Kinh')
+    expect(got.dna.matches.length).toBe(1)
+
+    // 6. PATCH enum sai → 400; REJECTED → GET trả null
+    const bad = await SELF.fetch(`${ORIGIN}/api/v1/persons/p-dna1/dna`, {
+      method: 'PATCH', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'JUNK' })
+    })
+    expect(bad.status).toBe(400)
+    await SELF.fetch(`${ORIGIN}/api/v1/persons/p-dna1/dna`, {
+      method: 'PATCH', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'REJECTED' })
+    })
+    const gone = await (await SELF.fetch(`${ORIGIN}/api/v1/persons/p-dna1/dna`, { headers: { cookie } })).json()
+    expect(gone.dna).toBeNull()
+  })
+})

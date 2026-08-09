@@ -45,7 +45,8 @@ export const CONSENT_SCOPES = [
   'chatbot_persona',
   'video_reanimation',
   '3d_avatar',
-  'commercial_use'
+  'commercial_use',
+  'dna_processing'
 ] as const
 export type ConsentScope = (typeof CONSENT_SCOPES)[number]
 

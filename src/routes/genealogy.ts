@@ -6,10 +6,11 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
+import { assertConsent } from '../lib/ai'
 import { enumProblem, json, pageParams, paginated, paramOf, problem, uuid, yearOf, ageOf } from '../lib/util'
 import { nextAnniversary, solarToLunar, formatLunar } from '../lib/lunar'
 import {
-  guardClanView, guardClanWrite, resolveClanId, visibleClanIds
+  clanOfPerson, guardClanView, guardClanWrite, resolveClanId, visibleClanIds
 } from '../lib/access'
 
 export const genealogyRoutes = new Hono<AppEnv>()
@@ -555,4 +556,126 @@ genealogyRoutes.get('/dashboard', async (c) => {
     rituals: rituals.results,
     altars: altars.results
   })
+})
+
+// ============ GĐ5-29 — DNA LAB (nhập liệu + quan hệ ước tính) ============
+
+/**
+ * DNA contract (GĐ5-29):
+ *  - POST /persons/:id/dna                — nhập profile (bắt buộc consent dna_processing)
+ *  - GET  /persons/:id/dna                — profile + matches (clan view)
+ *  - POST /persons/:id/dna/matches        — nhập quan hệ ước tính từ báo cáo lab
+ *  - PATCH /persons/:id/dna               — duyệt {status: APPROVED|REJECTED}
+ *  - Worker/đối tác ngoài (lab): parse file export (23andMe/MyHeritage) → gọi
+ *    POST /dna + /dna/matches với payload chuẩn dưới đây. Không cần đổi code.
+ */
+const DNA_PROVIDERS = ['manual', '23andme', 'myheritage', 'ancestry', 'other']
+const DNA_MATCH_KEYS = ['relationshipEstimate', 'sharedCentiMorgans', 'note']
+
+function sanitizeDnaMatches(b: any): any[] {
+  const arr = Array.isArray(b.matches) ? b.matches : []
+  return arr.slice(0, 200).map((m: any) => {
+    const out: Record<string, unknown> = { matchPersonId: String(m.matchPersonId || '').slice(0, 80) }
+    if (m.matchPersonName) out.matchPersonName = String(m.matchPersonName).slice(0, 120)
+    for (const k of DNA_MATCH_KEYS) if (m[k] !== undefined) out[k] = m[k]
+    return out
+  })
+}
+
+genealogyRoutes.post('/persons/:id/dna', requireAuth, async (c) => {
+  const personId = paramOf(c, 'id')
+  const clanId = await clanOfPerson(c, personId)
+  if (!clanId) return c.json(problem(404, 'Not found', 'Người này không tồn tại.'), 404)
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
+  const consent = await assertConsent(c.env, personId, 'dna_processing')
+  if (!consent.ok) {
+    return c.json(
+      problem(422, 'Consent required',
+        'Dữ liệu gen là dữ liệu đặc biệt nhạy cảm — cần ConsentRecord có scope dna_processing trước khi nhập.'),
+      422
+    )
+  }
+  const b = await c.req.json().catch(() => ({} as any))
+  if (!b.provider && !b.rawReportUrl && !b.haplogroup) {
+    return c.json(problem(400, 'Validation error', 'Cần ít nhất một trường dữ liệu DNA.'), 400)
+  }
+  const existing = await c.env.DB.prepare(
+    `SELECT id FROM dna_profiles WHERE person_id = ? AND status != 'REJECTED' LIMIT 1`
+  ).bind(personId).first<any>()
+  if (existing) {
+    return c.json(problem(409, 'Conflict', 'Người này đã có hồ sơ DNA (dùng PATCH để cập nhật).'), 409)
+  }
+  const id = uuid()
+  const ethnicity = Array.isArray(b.ethnicity) ? b.ethnicity.slice(0, 50) : []
+  const provider = DNA_PROVIDERS.includes(b.provider) ? b.provider : 'manual'
+  await c.env.DB.prepare(
+    `INSERT INTO dna_profiles (id, person_id, clan_id, provider, raw_report_url, haplogroup,
+       ethnicity, matches, status, consent_id, created_by)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    id, personId, clanId, provider, b.rawReportUrl || null, b.haplogroup || null,
+    JSON.stringify(ethnicity), '[]', 'APPROVED', consent.consentId || null, c.var.user!.id
+  ).run()
+  await audit(c, 'dna.profile.create', 'person', personId, { dnaId: id, provider, consentId: consent.consentId })
+  return c.json({ id, personId, status: 'APPROVED', provider, ethnicity, matches: [] }, 201)
+})
+
+genealogyRoutes.get('/persons/:id/dna', async (c) => {
+  const personId = paramOf(c, 'id')
+  const clanId = await clanOfPerson(c, personId)
+  if (!clanId) return c.json(problem(404, 'Not found', 'Người này không tồn tại.'), 404)
+  const denied = await guardClanView(c, clanId)
+  if (denied) return denied
+  const row = await c.env.DB.prepare(
+    `SELECT * FROM dna_profiles WHERE person_id = ? AND status != 'REJECTED' ORDER BY created_at DESC LIMIT 1`
+  ).bind(personId).first<any>()
+  if (!row) return c.json({ dna: null })
+  return c.json({
+    dna: {
+      id: row.id, personId: row.person_id, provider: row.provider,
+      rawReportUrl: row.raw_report_url, haplogroup: row.haplogroup,
+      ethnicity: json<any[]>(row.ethnicity, []), matches: json<any[]>(row.matches, []),
+      status: row.status, createdAt: row.created_at, updatedAt: row.updated_at
+    }
+  })
+})
+
+genealogyRoutes.post('/persons/:id/dna/matches', requireAuth, async (c) => {
+  const personId = paramOf(c, 'id')
+  const clanId = await clanOfPerson(c, personId)
+  if (!clanId) return c.json(problem(404, 'Not found', 'Người này không tồn tại.'), 404)
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
+  const row = await c.env.DB.prepare(
+    `SELECT * FROM dna_profiles WHERE person_id = ? AND status != 'REJECTED' ORDER BY created_at DESC LIMIT 1`
+  ).bind(personId).first<any>()
+  if (!row) return c.json(problem(404, 'Not found', 'Chưa có hồ sơ DNA — hãy POST /dna trước.'), 404)
+  const b = await c.req.json().catch(() => ({} as any))
+  const merged = [...json<any[]>(row.matches, []), ...sanitizeDnaMatches(b)]
+  await c.env.DB.prepare(
+    `UPDATE dna_profiles SET matches = ?, updated_at = datetime('now') WHERE id = ?`
+  ).bind(JSON.stringify(merged), row.id).run()
+  await audit(c, 'dna.matches.import', 'person', personId, { dnaId: row.id, added: b.matches?.length || 0 })
+  return c.json({ ok: true, matches: merged })
+})
+
+genealogyRoutes.patch('/persons/:id/dna', requireAuth, async (c) => {
+  const personId = paramOf(c, 'id')
+  const clanId = await clanOfPerson(c, personId)
+  if (!clanId) return c.json(problem(404, 'Not found', 'Người này không tồn tại.'), 404)
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
+  const b = await c.req.json().catch(() => ({} as any))
+  const statusErr = enumProblem(b, 'status', ['APPROVED', 'REJECTED'])
+  if (statusErr) return c.json(problem(400, 'Validation error', statusErr), 400)
+  const row = await c.env.DB.prepare(
+    `SELECT id FROM dna_profiles WHERE person_id = ? AND status != 'REJECTED' ORDER BY created_at DESC LIMIT 1`
+  ).bind(personId).first<any>()
+  if (!row) return c.json(problem(404, 'Not found', 'Chưa có hồ sơ DNA.'), 404)
+  await c.env.DB.prepare(
+    `UPDATE dna_profiles SET status = ?, updated_at = datetime('now') WHERE id = ?`
+  ).bind(b.status, row.id).run()
+  await audit(c, 'dna.profile.status', 'person', personId, { dnaId: row.id, status: b.status })
+  return c.json({ ok: true, status: b.status })
 })

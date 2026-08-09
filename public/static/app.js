@@ -611,8 +611,8 @@ function centerOn(id) {
 /* --------------------- Person drawer (dùng chung) ------------------ */
 async function openPerson(id) {
   drawer(loading('Đang mở hồ sơ…'))
-  let d
-  try { d = await api(`/persons/${id}`) } catch (e) { drawer(errBox(e)); return }
+  let d, dna
+  try { [d, dna] = await Promise.all([api(`/persons/${id}`), api(`/persons/${id}/dna`)]) } catch (e) { drawer(errBox(e)); return }
   const p = d.person
   const rel = d.relations
   const relBlock = (title, arr, icon) => !arr.length ? '' : `
@@ -674,6 +674,12 @@ async function openPerson(id) {
     ${relBlock('Anh chị em', rel.siblings, 'fa-users')}
     ${relBlock('Con', rel.children, 'fa-arrow-down')}
 
+    ${dna && dna.dna ? dnaSection(dna.dna, id) : (S.user ? `<div class="card paper mt-4" style="padding:var(--sp-4)">
+      <div class="fkey">DNA LAB</div>
+      <div class="muted" style="font-size:13px">Chưa có dữ liệu gen. Nhập hồ sơ DNA để hiển thị haplogroup, nguồn gốc dân tộc và quan hệ ước tính.</div>
+      <button class="btn sm mt-2" id="pd-dna-new"><i class="fa-solid fa-dna"></i> Nhập hồ sơ DNA</button>
+    </div>` : '')}
+
     <div id="pd-extra" class="mt-4"></div>`)
 
   $$('[data-p]').forEach((el) => el.onclick = () => openPerson(el.dataset.p))
@@ -695,6 +701,67 @@ async function openPerson(id) {
   $('#pd-consent').onclick = () => consentModal(id, p.full_name)
   if ($('#pd-restore')) $('#pd-restore').onclick = () => restorePhotoFlow(id, p.full_name, $('#pd-restore-out'))
   if ($('#pd-voice')) $('#pd-voice').onclick = () => voiceModal(id, p.full_name)
+  if ($('#pd-dna-new')) $('#pd-dna-new').onclick = () => dnaModal(id, p.full_name)
+}
+
+/** GĐ5-29 — Render hồ sơ DNA (haplogroup + nguồn gốc + quan hệ ước tính) */
+function dnaSection(d, personId) {
+  const eth = d.ethnicity || []
+  const matches = d.matches || []
+  return `<div class="card paper mt-4" style="padding:var(--sp-4)">
+    <div class="row between">
+      <div class="fkey"><i class="fa-solid fa-dna"></i> DNA LAB</div>
+      ${S.user ? `<button class="btn sm quiet" id="pd-dna-edit"><i class="fa-solid fa-plus"></i> Nhập quan hệ</button>` : ''}
+    </div>
+    <div class="mt-2" style="font-size:13px">
+      Nhà cung cấp: <b>${esc(d.provider)}</b> · Haplogroup: <b>${esc(d.haplogroup || '—')}</b>
+      ${d.rawReportUrl ? ` · <a href="${esc(d.rawReportUrl)}" target="_blank" rel="noopener">báo cáo gốc</a>` : ''}
+    </div>
+    ${eth.length ? `<div class="mt-3"><div class="fkey">NGUỒN GỐC DÂN TỘC</div>
+      ${eth.map((e) => `<div class="mt-1">
+        <div class="row between muted" style="font-size:12px"><span>${esc(e.label || e.name || '')}</span><span>${esc(String(e.percentage ?? e.pct ?? 0))}%</span></div>
+        <div class="progress mt-1"><div class="progress-fill" style="width:${Math.min(100, Number(e.percentage ?? e.pct ?? 0))}%"></div></div>
+      </div>`).join('')}
+    </div>` : ''}
+    ${matches.length ? `<div class="mt-3"><div class="fkey">QUAN HỆ ƯỚC TÍNH (${matches.length})</div>
+      <div class="list">${matches.slice(0, 12).map((m) => `<div class="list-item">
+        <div class="f1"><div class="t">${esc(m.matchPersonName || m.matchPersonId || 'Người thân ước tính')}</div>
+        <div class="d">${esc(m.relationshipEstimate || 'quan hệ chưa rõ')}${m.sharedCentiMorgans != null ? ` · ${esc(String(m.sharedCentiMorgans))} cM` : ''}${m.note ? ` · ${esc(m.note)}` : ''}</div></div>
+      </div>`).join('')}</div>
+    </div>` : ''}
+  </div>`
+}
+
+/** GĐ5-29 — Modal nhập hồ sơ DNA / quan hệ ước tính */
+function dnaModal(personId, name) {
+  modal(`
+    <div class="row between"><h3>DNA — ${esc(name)}</h3>
+      <button class="x-btn" data-close><i class="fa-solid fa-xmark"></i></button></div>
+    <p class="muted" style="font-size:13px">Cần ConsentRecord scope <b>dna_processing</b> (dữ liệu gen là dữ liệu nhạy cảm đặc biệt).</p>
+    <div class="field mt-3"><label>Nhà cung cấp</label>
+      <select id="dna-prov"><option value="manual">Nhập tay</option><option value="23andme">23andMe</option><option value="myheritage">MyHeritage</option><option value="ancestry">Ancestry</option></select></div>
+    <div class="field"><label>URL báo cáo gốc</label><input id="dna-report" placeholder="https://…"></div>
+    <div class="field"><label>Haplogroup</label><input id="dna-hap" placeholder="vd: R1a1a"></div>
+    <div class="field"><label>Nguồn gốc dân tộc (JSON: [{label, percentage}])</label>
+      <textarea id="dna-eth" rows="3" placeholder='[{"label":"Kinh","percentage":92},{"label":"Tày","percentage":8}]'></textarea></div>
+    <div class="row end mt-4"><button class="btn quiet" data-close>Huỷ</button>
+      <button class="btn gold" id="dna-go">Lưu hồ sơ</button></div>
+    <div id="dna-out" class="mt-3"></div>`)
+  $('#dna-go').onclick = async () => {
+    const out = $('#dna-out')
+    out.innerHTML = loading('Đang lưu…')
+    let eth = []
+    try { eth = JSON.parse($('#dna-eth').value.trim() || '[]') } catch { out.innerHTML = '<div class="alert danger">JSON nguồn gốc không hợp lệ.</div>'; return }
+    try {
+      await api(`/persons/${personId}/dna`, { method: 'POST', body: {
+        provider: $('#dna-prov').value, rawReportUrl: $('#dna-report').value.trim() || null,
+        haplogroup: $('#dna-hap').value.trim() || null, ethnicity: eth
+      }})
+      closeOverlay()
+      toast('Đã lưu hồ sơ DNA.')
+      openPerson(personId)
+    } catch (e) { out.innerHTML = errBox(e) }
+  }
 }
 
 /** GĐ5-27 — Giọng nói AI: phát thử (TTS) + clone giọng từ mẫu âm thanh */

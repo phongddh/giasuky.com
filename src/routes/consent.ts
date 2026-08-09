@@ -24,6 +24,7 @@ consentRoutes.get('/consent/scopes', (c) =>
       { id: 'chatbot_persona', label: 'Trò chuyện với persona AI', risk: 'HIGH', note: 'Chỉ trả lời từ ký ức có nguồn' },
       { id: 'video_reanimation', label: 'Tái tạo video', risk: 'HIGH' },
       { id: '3d_avatar', label: 'Avatar 3D', risk: 'MEDIUM' },
+      { id: 'dna_processing', label: 'Xử lý dữ liệu DNA', risk: 'CRITICAL', note: 'Chỉ lưu kết quả tổng hợp, không gen thô' },
       { id: 'commercial_use', label: 'Sử dụng thương mại', risk: 'CRITICAL', note: 'Mặc định TẮT, phải chọn riêng' }
     ]
   })

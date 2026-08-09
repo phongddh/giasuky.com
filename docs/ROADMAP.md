@@ -197,10 +197,11 @@
 - **Cần**: server mediasoup riêng + WebRTC; repo này giữ giao thức signalling + UI; thay cơ chế poll.
 - Trạng thái: `- [ ]`
 
-### 5-29. DNA lab
-- **Hiện trạng**: chưa có (README:263).
-- **Cần**: đối tác lab (23andMe/MyHeritage API), consent riêng, module nhập liệu + hiển thị quan hệ.
-- Trạng thái: `- [ ]`
+### 5-29. DNA lab — module nhập liệu + quan hệ ước tính (đối tác lab ngoài)
+- **Đã làm (in-repo)**: scope consent mới `dna_processing` (CRITICAL, hiện trong /consent/scopes + UI); migration `0004_dna_profiles.sql`; endpoints `POST/GET /persons/:id/dna`, `POST /persons/:id/dna/matches`, `PATCH /persons/:id/dna` (status APPROVED/REJECTED, enum chuẩn) — tất cả consent-gated (422 nếu thiếu) + clan guard + audit + payload sanitize (provider whitelist, matches ≤ 200); UI section DNA trong drawer người (haplogroup, thanh nguồn gốc dân tộc, danh sách quan hệ ước tính) + modal nhập hồ sơ.
+- **Contract đối tác ngoài (lab)**: parse export 23andMe/MyHeritage → gọi `POST /persons/:id/dna` `{provider, rawReportUrl, haplogroup, ethnicity:[{label,percentage}]}` rồi `POST /persons/:id/dna/matches` `{matches:[{matchPersonId, matchPersonName, relationshipEstimate, sharedCentiMorgans, note}]}`. Không đổi code.
+- **Test**: vitest 24/24 (422 không consent → 201 profile → 409 trùng → matches → GET → 400 enum → REJECTED ẩn profile); smoke HTTP hoàn chỉnh.
+- Trạng thái: `- [x]` (in-repo xong; kết quả gen thật cần đối tác lab)
 
 ### 5-30. Blockchain notary — adapter + UI explorer (chain thật cần key)
 - **Đã làm (in-repo)**: `src/lib/notary.ts` adapter — `anchorConsent(env, hash)`; đủ `BLOCKCHAIN_RPC_URL`+`BLOCKCHAIN_PRIVATE_KEY` (+`BLOCKCHAIN_CHAIN` stellar|evm-l2) → ký qua RPC (`POST {rpc}/anchor`); thiếu → mock-ledger (txHash hex, minh bạch trên UI). Migration `0003_notary_chain.sql`; POST /consent trả `chain`+`explorerUrl`; verify trả blockchain.explorerUrl; UI link "Xem trên explorer" + badge mock khi chưa có chain thật.
