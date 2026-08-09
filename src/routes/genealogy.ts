@@ -6,7 +6,7 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { json, paramOf, problem, uuid, yearOf, ageOf } from '../lib/util'
+import { enumProblem, json, paramOf, problem, uuid, yearOf, ageOf } from '../lib/util'
 import { nextAnniversary, solarToLunar, formatLunar } from '../lib/lunar'
 import {
   guardClanView, guardClanWrite, resolveClanId, visibleClanIds
@@ -206,6 +206,8 @@ genealogyRoutes.post('/clans/:clanId/members', requireAuth, async (c) => {
   if (denied) return denied
   const b = await c.req.json().catch(() => ({} as any))
   if (!b.full_name) return c.json(problem(400, 'Validation error', 'Cần họ tên.'), 400)
+  const enumErr = enumProblem(b, 'gender', ['M', 'F', 'OTHER'])
+  if (enumErr) return c.json(problem(400, 'Validation error', enumErr), 400)
   const id = uuid()
   let lunar: any = null
   if (b.death_date) {
@@ -422,6 +424,8 @@ genealogyRoutes.post('/persons/:id/relationships', requireAuth, async (c) => {
   }
   const denied = await guardClanWrite(c, fromClan.clan_id)
   if (denied) return denied
+  const enumErr = enumProblem(b, 'type', ['CHILD_OF', 'SPOUSE_OF', 'SIBLING_OF', 'ADOPTED_BY'])
+  if (enumErr) return c.json(problem(400, 'Validation error', enumErr), 400)
   const rid = uuid()
   await c.env.DB.prepare(
     `INSERT INTO relationships (id, from_person_id, to_person_id, type, biological, adopted, married_at, marriage_order)
@@ -476,7 +480,10 @@ genealogyRoutes.get('/dashboard', async (c) => {
        (SELECT COUNT(*) FROM memories WHERE clan_id = ?1 AND status='PENDING_REVIEW') AS pending,
        (SELECT COUNT(*) FROM advices WHERE clan_id = ?1) AS advices,
        (SELECT COUNT(*) FROM events WHERE clan_id = ?1) AS events,
-       (SELECT COUNT(*) FROM contradictions WHERE status='OPEN') AS contradictions,
+       (SELECT COUNT(*) FROM contradictions ct WHERE ct.status='OPEN'
+          AND (ct.event_id IN (SELECT id FROM events WHERE clan_id = ?1)
+               OR ct.memory_a_id IN (SELECT id FROM memories WHERE clan_id = ?1)
+               OR ct.memory_b_id IN (SELECT id FROM memories WHERE clan_id = ?1))) AS contradictions,
        (SELECT MAX(generation) FROM persons WHERE clan_id = ?1) AS generations`
   )
     .bind(clanId)

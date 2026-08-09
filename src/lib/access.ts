@@ -55,6 +55,8 @@ export async function visibleClanIds(c: Context<AppEnv>): Promise<Set<string> | 
 export async function resolveClanId(c: Context<AppEnv>): Promise<string | null> {
   const q = c.req.query('clanId')
   if (q) return (await canViewClan(c, q)) ? q : null
+  // Multi-clan: nếu param không có, ưu tiên clan đầu tiên user thuộc
+  if (c.var.user?.clan_ids?.length) return c.var.user.clan_ids[0]
   if (c.var.user?.clan_id) return c.var.user.clan_id
   if (isOpenAccess(c)) {
     const row = await c.env.DB.prepare(`SELECT id FROM clans ORDER BY created_at LIMIT 1`).first<any>()

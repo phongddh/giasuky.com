@@ -124,7 +124,15 @@ authRoutes.post('/elder-mode', requireAuth, async (c) => {
 /** 11.5 / P6 Data Sovereignty — export toàn bộ dữ liệu người dùng */
 authRoutes.get('/export', requireAuth, async (c) => {
   const uid = c.var.user!.id
-  const clanId = c.var.user!.clan_id
+  // Export theo clan ĐƯỢC CHỈ ĐỊNH (param) hoặc clan đầu tiên; không có clan → 400 thay vì bind undefined
+  const qClan = c.req.query('clanId')
+  const clanId = qClan && (c.var.user!.clan_ids || []).includes(qClan) ? qClan : c.var.user!.clan_id
+  if (!clanId) {
+    return c.json(
+      problem(400, 'Validation error', 'Bạn chưa thuộc dòng họ nào để xuất dữ liệu.'),
+      400
+    )
+  }
   const [persons, memories, advices, consents, wills, interviews, capsules, audits] =
     await Promise.all([
       c.env.DB.prepare(`SELECT * FROM persons WHERE clan_id = ?`).bind(clanId).all(),

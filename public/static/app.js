@@ -18,12 +18,28 @@ async function api(path, opts = {}) {
   let data = null
   try { data = await res.json() } catch { data = null }
   if (!res.ok) {
+    // 401 không phải từ luồng đăng nhập → phiên hết hạn: xoá phiên, về màn đăng nhập
+    if (res.status === 401 && !path.startsWith('/auth/')) handleUnauthorized()
     const err = new Error((data && (data.detail || data.title)) || `Lỗi ${res.status}`)
     err.status = res.status
     err.problem = data
     throw err
   }
   return data
+}
+
+/** Phiên hết hạn/bị thu hồi: xoá cookie + trạng thái, mở màn đăng nhập 1 lần */
+let _unauthHandled = false
+function handleUnauthorized() {
+  if (_unauthHandled) return
+  _unauthHandled = true
+  S.user = null
+  document.cookie = 'gsk_session=; Max-Age=0; Path=/; SameSite=Lax'
+  setTimeout(() => {
+    _unauthHandled = false
+    authModal()
+    toast('Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.', 'warn')
+  }, 300)
 }
 
 const esc = (s) =>
@@ -48,9 +64,10 @@ function avatar(p, cls = '') {
 
 const yr = (d) => (d ? String(d).slice(0, 4) : '?')
 function lifespan(p) {
-  const b = p.birth_date || p.birthDate
-  const d = p.death_date || p.deathDate
-  const alive = p.is_alive === 1 || p.isAlive === true
+  // brief() của API trả birthYear/deathYear; các nguồn khác dùng birth_date/death_date
+  const b = p.birth_date || p.birthDate || (p.birthYear ? `${p.birthYear}-01-01` : null)
+  const d = p.death_date || p.deathDate || (p.deathYear ? `${p.deathYear}-01-01` : null)
+  const alive = p.is_alive === 1 || p.isAlive === true || (!d && !p.deathYear)
   if (!b && !d) return alive ? 'còn sống' : ''
   return alive ? `${yr(b)} –` : `${yr(b)} – ${yr(d)}`
 }
@@ -675,7 +692,7 @@ async function openPerson(id) {
 }
 
 /* ==================== F1 — DIGITAL ALTAR =========================== */
-const ALTAR = { id: null, cursor: '1970-01-01 00:00:00', timer: null, sticks: 0, candles: true }
+const ALTAR = { id: null, cursor: '1970-01-01 00:00:00', timer: null, sticks: 0, candles: true, seen: new Set() }
 
 async function viewAltar(host) {
   host.innerHTML = loading('Đang mở bàn thờ…')
@@ -776,7 +793,7 @@ function renderAltar(host, data) {
   // nhang có sẵn từ log
   const already = (data.ritualLog || []).filter((r) => r.type === 'INCENSE').length
   ALTAR.sticks = 0
-  for (let i = 0; i < Math.min(already, 9); i++) addStick(true)
+  for (let i = 0; i < Math.min(already, 12); i++) addStick(true)
   startSmoke()
 
   $('#act-incense').onclick = () => ritualAct('INCENSE')
@@ -806,7 +823,11 @@ function logItem(r) {
 
 function addStick(silent) {
   const host = $('#sticks')
-  if (!host || ALTAR.sticks >= 12) return
+  if (!host) return
+  if (ALTAR.sticks >= 12) {
+    if (!silent) stageToast('Lư hương đã đầy (12 nén) — hãy để nén thờ được dâng thêm ở lễ sau.')
+    return
+  }
   ALTAR.sticks++
   const s = document.createElement('div')
   s.className = 'stick'
@@ -851,7 +872,7 @@ async function ritualAct(type, payload = {}, visual = true) {
   } catch (e) {
     // offline queue idempotent theo AC-F1.4
     const q = JSON.parse(localStorage.getItem('gsk_queue') || '[]')
-    q.push({ altarId: ALTAR.id, type, payload, clientEventId })
+    q.push({ altarId: ALTAR.id, type, payload, clientEventId, attempts: 0 })
     localStorage.setItem('gsk_queue', JSON.stringify(q))
     toast('Mất mạng — nghi lễ đã lưu tạm và sẽ tự gửi lại.', 'warn')
   }
@@ -861,11 +882,20 @@ async function flushQueue() {
   const q = JSON.parse(localStorage.getItem('gsk_queue') || '[]')
   if (!q.length) return
   const left = []
+  let sent = 0, failed = 0
   for (const it of q) {
-    try { await api('/ritual-events', { method: 'POST', body: it }) } catch { left.push(it) }
+    try {
+      await api('/ritual-events', { method: 'POST', body: it })
+      sent++
+    } catch {
+      const n = (it.attempts || 0) + 1
+      if (n < 3) left.push({ ...it, attempts: n })
+      else failed++
+    }
   }
   localStorage.setItem('gsk_queue', JSON.stringify(left))
-  if (q.length !== left.length) toast(`Đã gửi lại ${q.length - left.length} nghi lễ lưu offline.`)
+  if (sent) toast(`Đã gửi lại ${sent} nghi lễ lưu offline.`)
+  if (failed) toast(`${failed} nghi lễ không gửi được sau 3 lần — hãy kiểm tra kết nối rồi tải lại trang.`, 'err')
 }
 
 function stageToast(msg) {
@@ -886,6 +916,10 @@ async function pollAltar() {
     const log = $('#ritual-log')
     const who = new Set()
     ;(r.events || []).forEach((e) => {
+      // Chống echo: bỏ hành động của chính mình (đã áp dụng local khi gửi) + dedup event cùng giây
+      if (!e.id || ALTAR.seen.has(e.id)) return
+      if (S.user && e.user_id === S.user.id) return
+      ALTAR.seen.add(e.id)
       who.add(e.actor)
       if (log) log.insertAdjacentHTML('afterbegin', logItem(e))
       if (e.type === 'INCENSE') { addStick(); stageToast(`${e.actor} vừa thắp nhang`) }
@@ -1707,7 +1741,8 @@ async function openInterview(id) {
   drawer(loading('Đang mở buổi phỏng vấn…'))
   try {
     const d = await api('/interviews/' + id)
-    ITV.session = d.session; ITV.host = d.host; ITV.topic = d.topic; ITV.ended = false
+    // reset t0 cho buổi MỚI — nếu giữ t0 buổi trước thì duration_seconds cộng dồn sai
+    ITV.session = d.session; ITV.host = d.host; ITV.topic = d.topic; ITV.ended = false; ITV.t0 = Date.now()
     renderInterview()
   } catch (e) {
     drawer(`<div class="drawer-head"><h2>Lỗi</h2><button class="x-btn" data-close><i class="fa-solid fa-xmark"></i></button></div>${errBox(e)}`)
@@ -2085,7 +2120,7 @@ function personaBubble(m, details, noMatch) {
    F6 — Ritual Sync (nghi lễ trực tuyến đồng bộ)
    4.6: đếm ngược theo lịch âm, phòng lễ, dâng hương đồng bộ, karaoke gia huấn.
    ===================================================================== */
-const RIT = { id: null, cursor: '1970-01-01 00:00:00', timer: null, cd: null, karaokeTimer: null }
+const RIT = { id: null, cursor: '1970-01-01 00:00:00', timer: null, cd: null, karaokeTimer: null, seen: new Set() }
 
 const RTYPE = { GIO: 'Giỗ', TET: 'Tết', THANH_MINH: 'Thanh Minh', CAU_AN: 'Cầu an', OTHER: 'Khác' }
 const RSTAGE = {
@@ -2447,7 +2482,7 @@ async function openRitualRoom(id) {
 }
 
 function addStickTo(host, i) {
-  if (!host) return
+  if (!host || i >= 12) return
   const s = document.createElement('span')
   s.className = 'stick'
   s.style.setProperty('--i', String(i))
@@ -2516,12 +2551,14 @@ async function pollRitual() {
       '&since=' + encodeURIComponent(RIT.cursor))
     if (r.cursor) RIT.cursor = r.cursor
     const log = $('#rm-log')
-    for (const e of (r.events || []).slice().reverse()) {
+    const fresh = (r.events || []).filter((e) => e.id && !RIT.seen.has(e.id) && !(S.user && e.user_id === S.user.id))
+    fresh.forEach((e) => RIT.seen.add(e.id))
+    for (const e of fresh.slice().reverse()) {
       if (log) log.insertAdjacentHTML('afterbegin', logItem(e))
       if (e.type === 'INCENSE') { addStickTo($('#rm-sticks'), ALTAR.sticks++); startSmokeIn('#rm-smoke') }
       if (e.type === 'JOIN') stageToast(`${e.actor || 'Một người trong họ'} vừa vào phòng lễ`)
     }
-    if ((r.events || []).length) renderPresence('#rm-presence', r.events)
+    if (fresh.length) renderPresence('#rm-presence', r.events)
   } catch (_) {}
 }
 

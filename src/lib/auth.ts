@@ -39,17 +39,26 @@ export async function sessionMiddleware(c: Context<AppEnv>, next: Next) {
   const token = getCookie(c, COOKIE)
   if (token) {
     const row = await c.env.DB.prepare(
-      `SELECT u.id, u.full_name, u.email, u.elder_mode,
-              cm.clan_id AS clan_id, cm.role AS clan_role
+      `SELECT u.id, u.full_name, u.email, u.elder_mode
          FROM sessions s
          JOIN users u ON u.id = s.user_id AND u.is_deleted = 0
-         LEFT JOIN clan_members cm ON cm.user_id = u.id
         WHERE s.token = ? AND s.expires_at > datetime('now')
         LIMIT 1`
     )
       .bind(token)
       .first<SessionUser>()
-    if (row) c.set('user', row)
+    if (row) {
+      // Multi-clan: lấy ĐỦ danh sách dòng họ, không LIMIT 1 ngẫu nhiên
+      const clans = await c.env.DB.prepare(
+        `SELECT clan_id, role FROM clan_members WHERE user_id = ? ORDER BY joined_at`
+      )
+        .bind(row.id)
+        .all<any>()
+      row.clan_ids = (clans.results || []).map((m) => m.clan_id)
+      row.clan_id = row.clan_ids[0] ?? null
+      row.clan_role = (clans.results || [])[0]?.role ?? null
+      c.set('user', row)
+    }
   }
   await next()
 }

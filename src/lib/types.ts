@@ -16,6 +16,8 @@ export type SessionUser = {
   elder_mode: number
   clan_id?: string | null
   clan_role?: string | null
+  /** Toàn bộ dòng họ user thuộc (multi-clan: dùng để resolve đúng clan thay vì LIMIT 1 ngẫu nhiên) */
+  clan_ids?: string[]
 }
 
 export type Variables = {

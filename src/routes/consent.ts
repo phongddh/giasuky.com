@@ -7,7 +7,7 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { CONSENT_SCOPES } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { json, paramOf, problem, sha256, uuid } from '../lib/util'
+import { enumProblem, json, paramOf, problem, sha256, uuid } from '../lib/util'
 import {
   clanOfPerson, clanOfRestRequest, clanOfWill,
   guardClanView, guardClanWrite, isOpenAccess, visibleClanIds
@@ -84,6 +84,8 @@ consentRoutes.post('/consent', requireAuth, async (c) => {
   if (invalid.length) {
     return c.json(problem(400, 'Validation error', `Scope không hợp lệ: ${invalid.join(', ')}`), 400)
   }
+  const methodErr = enumProblem(b, 'signatureMethod', ['NATIONAL_EID', 'HANDWRITTEN_SCAN', 'VIDEO_CONSENT', 'NOTARY'])
+  if (methodErr) return c.json(problem(400, 'Validation error', methodErr), 400)
   const highRisk = ['voice_clone', 'video_reanimation', 'chatbot_persona', '3d_avatar']
   const needsStrong = b.scope.some((s: string) => highRisk.includes(s))
   const method = b.signatureMethod || 'HANDWRITTEN_SCAN'
@@ -266,6 +268,10 @@ consentRoutes.post('/rest-requests', requireAuth, async (c) => {
   if (!rec) return c.json(problem(404, 'Not found', 'Không tìm thấy bản ghi đồng thuận.'), 404)
   const denied = await guardClanWrite(c, await clanOfPerson(c, rec.subject_person_id))
   if (denied) return denied
+  const enumErr =
+    enumProblem(b, 'mode', ['SOFT_SUNSET', 'HARD_DELETE']) ||
+    enumProblem(b, 'trigger', ['INACTIVITY', 'MANUAL_TRIGGER', 'INHERITOR_DECISION'])
+  if (enumErr) return c.json(problem(400, 'Validation error', enumErr), 400)
   const rtr = json<any>(rec.right_to_rest, { inheritorApprovalCount: 2 })
   const id = uuid()
   await c.env.DB.prepare(

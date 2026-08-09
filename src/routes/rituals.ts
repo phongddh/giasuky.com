@@ -7,7 +7,7 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { RELIGION_THEMES } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { json, paramOf, problem, uuid } from '../lib/util'
+import { enumProblem, json, paramOf, problem, uuid } from '../lib/util'
 import { formatLunar, majorLunarHolidays, nextAnniversary, solarToLunar, lunarToSolar } from '../lib/lunar'
 import {
   clanOfAltar, clanOfRitual, guardClanView, guardClanWrite, isOpenAccess, resolveClanId, visibleClanIds
@@ -171,8 +171,10 @@ ritualRoutes.post('/ritual-events', async (c) => {
       : b.ritualId
         ? await clanOfRitual(c, b.ritualId)
         : null
-    const denied = await guardClanWrite(c, clanId)
-    if (denied) return denied
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
+  const enumErr = enumProblem(b, 'ritualType', ['GIO', 'TET', 'THANH_MINH', 'CAU_AN', 'OTHER'])
+  if (enumErr) return c.json(problem(400, 'Validation error', enumErr), 400)
   }
   const type = ['INCENSE', 'FLOWER', 'OFFERING', 'PRAYER', 'CANDLE', 'JOIN', 'LEAVE'].includes(b.type)
     ? b.type
@@ -221,7 +223,7 @@ ritualRoutes.get('/ritual-events/stream', async (c) => {
     `SELECT re.*, u.full_name AS user_name FROM ritual_events re
        LEFT JOIN users u ON u.id = re.user_id
       WHERE ((?1 IS NOT NULL AND re.altar_id = ?1) OR (?2 IS NOT NULL AND re.ritual_id = ?2))
-        AND re.created_at > ?3
+        AND re.created_at >= ?3
       ORDER BY re.created_at LIMIT 100`
   )
     .bind(altarId || null, ritualId || null, since)
@@ -230,6 +232,7 @@ ritualRoutes.get('/ritual-events/stream', async (c) => {
     id: r.id,
     type: r.type,
     actor: r.user_name || r.actor_name,
+    user_id: r.user_id,
     payload: json<any>(r.payload, {}),
     at: r.created_at
   }))
@@ -288,6 +291,8 @@ ritualRoutes.post('/rituals', requireAuth, async (c) => {
   }
   const denied = await guardClanWrite(c, clanId)
   if (denied) return denied
+  const enumErr = enumProblem(b, 'ritualType', ['GIO', 'TET', 'THANH_MINH', 'CAU_AN', 'OTHER'])
+  if (enumErr) return c.json(problem(400, 'Validation error', enumErr), 400)
   let scheduledAt = b.scheduledAt
   let lunarDay = b.lunarDay ?? null
   let lunarMonth = b.lunarMonth ?? null
@@ -299,9 +304,12 @@ ritualRoutes.post('/rituals', requireAuth, async (c) => {
   if (!scheduledAt) {
     return c.json(problem(400, 'Validation error', 'Cần scheduledAt hoặc (lunarDay + lunarMonth).'), 400)
   }
+  const scheduledDate = new Date(scheduledAt)
+  if (isNaN(scheduledDate.getTime())) {
+    return c.json(problem(400, 'Validation error', 'scheduledAt không phải ngày giờ hợp lệ.'), 400)
+  }
   if (!lunarDay) {
-    const d = new Date(scheduledAt)
-    const l = solarToLunar(d.getUTCDate(), d.getUTCMonth() + 1, d.getUTCFullYear())
+    const l = solarToLunar(scheduledDate.getUTCDate(), scheduledDate.getUTCMonth() + 1, scheduledDate.getUTCFullYear())
     lunarDay = l.day
     lunarMonth = l.month
   }
@@ -314,7 +322,7 @@ ritualRoutes.post('/rituals', requireAuth, async (c) => {
     .bind(
       id, b.clan_id || c.var.user!.clan_id || null, b.altarId || null, b.title,
       b.subjectPersonId || null, b.ritualType || 'GIO',
-      new Date(scheduledAt).toISOString(), lunarDay, lunarMonth,
+      scheduledDate.toISOString(), lunarDay, lunarMonth,
       b.giaHuanText || null, c.var.user!.id
     )
     .run()

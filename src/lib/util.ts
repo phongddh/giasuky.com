@@ -171,3 +171,15 @@ export function yearOf(d?: string | null): string {
   const m = /^(\d{4})/.exec(d)
   return m ? m[1] : '?'
 }
+
+/**
+ * Whitelist enum validation (3-12): trả lỗi message nếu b[field] không thuộc
+ * allowed; trả null nếu không có value (route tự dùng default) hoặc hợp lệ.
+ */
+export function enumProblem(b: any, field: string, allowed: string[]): string | null {
+  if (b[field] === undefined || b[field] === null || b[field] === '') return null
+  if (!allowed.includes(b[field])) {
+    return `${field} không hợp lệ. Cho phép: ${allowed.join(', ')}`
+  }
+  return null
+}

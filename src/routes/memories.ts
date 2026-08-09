@@ -6,7 +6,7 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { json, paramOf, problem, removeTone, uuid } from '../lib/util'
+import { enumProblem, json, paramOf, problem, removeTone, uuid } from '../lib/util'
 import { embed, llmChat, llmAvailable } from '../lib/ai'
 import { ADVICE_CATEGORIES } from '../lib/types'
 import {
@@ -36,6 +36,12 @@ memoryRoutes.post('/memories', requireAuth, async (c) => {
   }
   const denied = await guardClanWrite(c, clanId)
   if (denied) return denied
+  const enumErr =
+    enumProblem(b, 'type', ['TEXT', 'AUDIO', 'VIDEO', 'PHOTO', 'MIXED']) ||
+    enumProblem(b, 'status', ['PENDING_REVIEW', 'APPROVED', 'REJECTED']) ||
+    enumProblem(b, 'visibility', ['PRIVATE', 'FAMILY', 'CLAN', 'PUBLIC']) ||
+    enumProblem(b, 'source', ['MANUAL', 'AI_INTERVIEW', 'IMPORT', 'TIME_CAPSULE'])
+  if (enumErr) return c.json(problem(400, 'Validation error', enumErr), 400)
   const id = uuid()
   await c.env.DB.prepare(
     `INSERT INTO memories (id, clan_id, type, content, content_no_tone, media_url, language,
@@ -111,7 +117,8 @@ memoryRoutes.get('/persons/:id/memories', async (c) => {
   const denied = await guardClanView(c, await clanOfPerson(c, pid))
   if (denied) return denied
   const type = c.req.query('type')
-  const limit = Math.min(parseInt(c.req.query('limit') || '20', 10), 100)
+  const lim = parseInt(c.req.query('limit') || '20', 10)
+  const limit = Number.isFinite(lim) && lim > 0 ? Math.min(lim, 100) : 20
   const rows = await c.env.DB.prepare(
     `SELECT m.*, pt.full_name AS teller_name, e.title AS event_title
        FROM memories m
@@ -150,6 +157,10 @@ memoryRoutes.post('/events', requireAuth, async (c) => {
   }
   const denied = await guardClanWrite(c, clanId)
   if (denied) return denied
+  const enumErr =
+    enumProblem(b, 'event_type', ['WEDDING', 'FUNERAL', 'BIRTH', 'DEATH', 'WAR', 'MIGRATION', 'OTHER']) ||
+    enumProblem(b, 'significance', ['FAMILY', 'CLAN', 'HISTORICAL'])
+  if (enumErr) return c.json(problem(400, 'Validation error', enumErr), 400)
   const id = uuid()
   await c.env.DB.prepare(
     `INSERT INTO events (id, clan_id, title, event_date, event_type, location, significance, cover_photo_url)
@@ -544,6 +555,8 @@ memoryRoutes.post('/time-capsules', requireAuth, async (c) => {
   }
   const denied = await guardClanWrite(c, clanId)
   if (denied) return denied
+  const enumErr = enumProblem(b, 'release_mode', ['DATE', 'ON_DEATH', 'MILESTONE'])
+  if (enumErr) return c.json(problem(400, 'Validation error', enumErr), 400)
   const id = uuid()
   await c.env.DB.prepare(
     `INSERT INTO time_capsules (id, clan_id, author_person_id, recipient_person_id, recipient_note,

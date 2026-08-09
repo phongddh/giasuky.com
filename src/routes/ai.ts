@@ -7,10 +7,10 @@ import { streamSSE } from 'hono/streaming'
 import type { AppEnv } from '../lib/types'
 import { AI_HOSTS, INTERVIEW_TOPICS } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { json, paramOf, problem, removeTone, uuid, ageOf } from '../lib/util'
+import { enumProblem, json, paramOf, problem, removeTone, uuid, ageOf } from '../lib/util'
 import {
   assertConsent, buildPersonaPrompt, checkRateLimit, detectGrief, embed,
-  llmAvailable, llmChat, postProcessPersona, retrieveMemories, scanOutput
+  llmAvailable, llmChat, postProcessPersona, retrieveMemories, scanInput, scanOutput, wrapUserInput
 } from '../lib/ai'
 import {
   clanOfInterview, clanOfPerson, guardClanView, guardClanWrite, visibleClanIds
@@ -48,19 +48,28 @@ aiRoutes.post('/interviews', requireAuth, async (c) => {
   const denied = await guardClanWrite(c, clanId)
   if (denied) return denied
   // 7.9 rate limit: free 1 session/tuần
-  const rl = await checkRateLimit(c.env, c.var.user!.id, 'interviews', 5, 24 * 7)
+  const rl = await checkRateLimit(c.env, c.var.user!.id, 'interviews', 1, 24 * 7)
   if (!rl.ok) {
     return c.json(
       problem(429, 'Rate limited', 'Đã đạt giới hạn số buổi phỏng vấn trong tuần (gói hiện tại).'),
       429
     )
   }
-  // AC-F2.5: PSTN cần consent audio; mọi kênh cần consent chatbot/voice để lưu ghi âm
-  const consent = await c.env.DB.prepare(
-    `SELECT id FROM consent_records WHERE subject_person_id = ? AND status='active' LIMIT 1`
-  )
-    .bind(b.intervieweeId)
-    .first<any>()
+  // AC-F2.5: phỏng vấn phải có consent active đúng scope (chatbot_persona);
+  // không có → 422 kèm hướng dẫn (không tự động tạo phỏng vấn không đồng thuận)
+  const consent = await assertConsent(c.env, b.intervieweeId, 'chatbot_persona')
+  if (!consent.ok) {
+    return c.json(
+      problem(
+        422,
+        'Consent required',
+        'Người này chưa có đồng thuận AI (chatbot_persona). Hãy tạo ConsentRecord cho họ trước khi phỏng vấn.'
+      ),
+      422
+    )
+  }
+  const enumErr = enumProblem(b, 'language', ['VI_NORTH', 'VI_CENTRAL', 'VI_SOUTH', 'EN', 'MIXED'])
+  if (enumErr) return c.json(problem(400, 'Validation error', enumErr), 400)
 
   const id = uuid()
   await c.env.DB.prepare(
@@ -74,7 +83,7 @@ aiRoutes.post('/interviews', requireAuth, async (c) => {
       b.channel === 'pstn_twilio' ? 'pstn_twilio' : 'app_voip',
       b.scheduledAt || null, b.topic || 'tuoi_tho',
       b.language || 'VI_SOUTH', b.aiHostId || 'AI_FEMALE_SAIGON',
-      consent?.id || null
+      consent.consentId || null
     )
     .run()
   await audit(c, 'interview.schedule', 'interview_session', id, {
@@ -156,6 +165,10 @@ aiRoutes.post('/interviews/:id/turn', requireAuth, async (c) => {
 
   const userText = String(b.text || '').trim()
   if (!userText) return c.json(problem(400, 'Validation error', 'Thiếu nội dung lời kể.'), 400)
+  const inj = scanInput(userText)
+  if (inj.blocked) {
+    return c.json(problem(400, 'Prompt injection', inj.reason!), 400)
+  }
   const elapsed = b.elapsed ?? turns.length * 25
 
   turns.push({ role: 'interviewee', content: userText, t: elapsed, ts: new Date().toISOString() })
@@ -188,7 +201,7 @@ aiRoutes.post('/interviews/:id/turn', requireAuth, async (c) => {
     })
     const history = turns.slice(-12).map((t) => ({
       role: (t.role === 'ai' ? 'assistant' : 'user') as 'assistant' | 'user',
-      content: t.content
+      content: t.role === 'ai' ? t.content : wrapUserInput(t.content)
     }))
     const out = await llmChat(c.env, [{ role: 'system', content: sys }, ...history], {
       maxTokens: 300
@@ -381,7 +394,7 @@ aiRoutes.post('/personas/:personId/chat', requireAuth, async (c) => {
   if (!consent.ok) return c.json(consent.error, 403)
 
   // 2) rate limit (7.9): free 20 msg/ngày
-  const rl = await checkRateLimit(c.env, c.var.user!.id, 'persona_chat', 200, 24)
+  const rl = await checkRateLimit(c.env, c.var.user!.id, 'persona_chat', 20, 24)
   if (!rl.ok) {
     return c.json(problem(429, 'Rate limited', 'Đã hết lượt trò chuyện hôm nay.'), 429)
   }
@@ -407,7 +420,8 @@ aiRoutes.post('/personas/:personId/chat', requireAuth, async (c) => {
   // số tài khoản, nên persona phải từ chối ngay và cảnh báo người dùng —
   // tuyệt đối không đưa nội dung này tới LLM.
   const inScan = scanOutput(message)
-  if (inScan.blocked) {
+  const injScan = scanInput(message)
+  if (inScan.blocked || injScan.blocked) {
     const warn =
       `Câu hỏi này đã bị chặn theo hàng rào an toàn 11.6: persona của ${person.full_name} ` +
       `không bao giờ nói về tiền, số tài khoản, mã OTP, mật khẩu hay giấy tờ tùy thân.\n\n` +
@@ -475,7 +489,7 @@ aiRoutes.post('/personas/:personId/chat', requireAuth, async (c) => {
               }
             ]
           : []),
-        { role: 'user', content: message }
+        { role: 'user', content: wrapUserInput(message) }
       ],
       { maxTokens: 400 }
     )
@@ -546,7 +560,7 @@ aiRoutes.post('/personas/:personId/chat-stream', requireAuth, async (c) => {
   if (!consent.ok) return c.json(consent.error, 403)
 
   // 2) rate limit (7.9) — dùng chung hạn mức với /chat để không bypass
-  const rl = await checkRateLimit(c.env, c.var.user!.id, 'persona_chat', 200, 24)
+  const rl = await checkRateLimit(c.env, c.var.user!.id, 'persona_chat', 20, 24)
   if (!rl.ok) {
     return c.json(problem(429, 'Rate limited', 'Đã hết lượt trò chuyện hôm nay.'), 429)
   }
@@ -560,14 +574,17 @@ aiRoutes.post('/personas/:personId/chat-stream', requireAuth, async (c) => {
     .bind(uuid(), pid, c.var.user!.id, message)
     .run()
 
-  // 4) quét CẢ câu hỏi đi vào (11.6) — như /chat
+  // 4) quét CẢ câu hỏi đi vào (11.6 + chống prompt injection) — như /chat
   const inScan = scanOutput(message)
-  if (inScan.blocked) {
+  const injScan = scanInput(message)
+  if (inScan.blocked || injScan.blocked) {
     const warn =
-      `Câu hỏi này đã bị chặn theo hàng rào an toàn 11.6: persona của ${person.full_name} ` +
-      `không bao giờ nói về tiền, số tài khoản, mã OTP, mật khẩu hay giấy tờ tùy thân.\n\n` +
-      `Nếu có ai đang dùng giọng nói hoặc hình ảnh người thân đã mất để hỏi bạn những điều đó, ` +
-      `đây gần như chắc chắn là lừa đảo. Hãy gọi trực tiếp cho người trong nhà để kiểm chứng.`
+      injScan.blocked
+        ? injScan.reason!
+        : `Câu hỏi này đã bị chặn theo hàng rào an toàn 11.6: persona của ${person.full_name} ` +
+          `không bao giờ nói về tiền, số tài khoản, mã OTP, mật khẩu hay giấy tờ tùy thân.\n\n` +
+          `Nếu có ai đang dùng giọng nói hoặc hình ảnh người thân đã mất để hỏi bạn những điều đó, ` +
+          `đây gần như chắc chắn là lừa đảo. Hãy gọi trực tiếp cho người trong nhà để kiểm chứng.`
     const mid = uuid()
     await c.env.DB.prepare(
       `INSERT INTO persona_messages (id, person_id, user_id, role, content, citations, blocked, block_reason)
@@ -629,7 +646,7 @@ aiRoutes.post('/personas/:personId/chat-stream', requireAuth, async (c) => {
             }
           ]
         : []),
-      { role: 'user', content: message }
+      { role: 'user', content: wrapUserInput(message) }
     ],
     { maxTokens: 400 }
   )
