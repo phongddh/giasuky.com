@@ -218,6 +218,9 @@
 
 ## Checklist deploy production (P0)
 
+> Script tự động hoá toàn bộ checklist: **`./scripts/deploy-production.sh`** (chạy `--dry-run` trước để xem kế hoạch; flags: `--seed`, `--openai-key=`, `--base-url=`, `--model=`, `--allowed-origins=`, `--url=` cho smoke test). Điều kiện tiên quyết: `npx wrangler login`.
+
+- [x] Script `deploy-production.sh` sẵn sàng (dry-run pass; tự tạo D1 + cập nhật `database_id`, idempotent, fail-fast, test+build trước deploy, smoke `/api/health`)
 - [ ] Tạo database D1 `webapp-production` trong Cloudflare dashboard → copy ID vào `wrangler.jsonc` (`database_id`)
 - [ ] `npx wrangler d1 migrations apply webapp-production --remote`
 - [ ] Seed remote: `npx wrangler d1 execute webapp-production --remote --file=seed.sql` (chỉ khi cần dữ liệu demo)
