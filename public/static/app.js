@@ -58,13 +58,13 @@ function lifespan(p) {
 function fmtDate(s) {
   if (!s) return '—'
   const d = new Date(String(s).includes('T') ? s : String(s).replace(' ', 'T') + 'Z')
-  if (isNaN(d)) return String(s)
+  if (isNaN(d)) return esc(String(s))
   return d.toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 function fmtDay(s) {
   if (!s) return '—'
   const d = new Date(s)
-  if (isNaN(d)) return String(s)
+  if (isNaN(d)) return esc(String(s))
   return d.toLocaleDateString('vi-VN', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' })
 }
 
@@ -2878,15 +2878,15 @@ async function verifyConsent(id) {
         <dt>Mã bản ghi</dt><dd><code>${esc(v.consentId)}</code></dd>
         <dt>Trạng thái</dt><dd><span class="badge ${st[1]}">${st[0]}</span></dd>
         <dt>Mã băm đã lưu</dt><dd><code style="word-break:break-all">${esc(v.storedHash || '')}</code></dd>
-        <dt>Băm lại hiện tại</dt><dd><code style="word-break:break-all">${esc(v.recomputedHashOfCurrentState || '')}</code></dd>
+        <dt>Băm lại hiện tại</dt><dd><code style="word-break:break-all">${esc(v.recomputedHash || '')}</code></dd>
         <dt>Mạng công chứng</dt><dd>${esc(v.blockchain ? v.blockchain.network : '')}</dd>
         <dt>Địa chỉ hợp đồng</dt><dd><code>${esc(v.blockchain ? v.blockchain.contractAddress : '')}</code></dd>
         <dt>Chứa dữ liệu cá nhân?</dt><dd><span class="badge green">Không</span></dd>
       </dl>
-      <div class="alert ${v.storedHash === v.recomputedHashOfCurrentState ? 'ok' : 'warn'} mt-3" style="font-size:13px">
-        ${v.storedHash === v.recomputedHashOfCurrentState
-          ? '<i class="fa-solid fa-check-double"></i> Hai mã băm trùng khớp — bản ghi chưa bị sửa đổi.'
-          : '<i class="fa-solid fa-circle-info"></i> Mã băm khác nhau vì trạng thái bản ghi đã thay đổi sau khi ký (ví dụ đã thu hồi). Mã băm gốc vẫn được lưu vĩnh viễn để đối chiếu.'}
+      <div class="alert ${v.verified ? 'ok' : 'warn'} mt-3" style="font-size:13px">
+        ${v.verified
+          ? '<i class="fa-solid fa-check-double"></i> Bản ghi hợp lệ — mã băm khớp, nội dung chưa bị sửa đổi.'
+          : '<i class="fa-solid fa-circle-info"></i> Mã băm không khớp với trạng thái hiện tại (ví dụ bản ghi đã thu hồi sau khi ký). Mã băm gốc vẫn được lưu vĩnh viễn để đối chiếu.'}
       </div>`, { wide: true })
   } catch (e) { modal(`<h3>Lỗi</h3>${errBox(e)}<div class="row end mt-3"><button class="btn quiet" data-close>Đóng</button></div>`) }
 }

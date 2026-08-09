@@ -86,11 +86,23 @@ memoryRoutes.get('/memories/:id', async (c) => {
 
 memoryRoutes.delete('/memories/:id', requireAuth, async (c) => {
   const id = paramOf(c, 'id')
-  const denied = await guardClanWrite(c, await clanOfMemory(c, id))
+  const clanId = await clanOfMemory(c, id)
+  if (!clanId) return c.json(problem(404, 'Not found', 'Không tìm thấy ký ức.'), 404)
+  const denied = await guardClanWrite(c, clanId)
   if (denied) return denied
-  await c.env.DB.prepare(`DELETE FROM memories WHERE id = ?`).bind(id).run()
-  await c.env.DB.prepare(`DELETE FROM memory_embeddings WHERE memory_id = ?`).bind(id).run()
-  await audit(c, 'memory.delete', 'memory', id)
+  // Cascade: bảng con + dữ liệu trỏ ngược, trong 1 batch
+  const stmts: D1PreparedStatement[] = [
+    c.env.DB.prepare(`DELETE FROM memory_persons WHERE memory_id = ?`).bind(id),
+    c.env.DB.prepare(`DELETE FROM memory_embeddings WHERE memory_id = ?`).bind(id),
+    c.env.DB.prepare(`DELETE FROM contradictions WHERE memory_a_id = ? OR memory_b_id = ?`).bind(id, id),
+    c.env.DB.prepare(`DELETE FROM advices WHERE source_memory_id = ?`).bind(id),
+    c.env.DB.prepare(
+      `UPDATE persona_messages SET citations = '[]' WHERE instr(citations, ?) > 0`
+    ).bind(JSON.stringify(id)),
+    c.env.DB.prepare(`DELETE FROM memories WHERE id = ?`).bind(id)
+  ]
+  await c.env.DB.batch(stmts)
+  await audit(c, 'memory.delete', 'memory', id, { cascade: true })
   return c.json({ ok: true })
 })
 

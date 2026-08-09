@@ -537,6 +537,10 @@ aiRoutes.post('/personas/:personId/chat-stream', requireAuth, async (c) => {
     .first<any>()
   if (!person) return c.json(problem(404, 'Not found', 'Không tìm thấy người này.'), 404)
 
+  // 0) guard clan (chống IDOR xuyên clan — như /chat)
+  const denied = await guardClanWrite(c, await clanOfPerson(c, pid))
+  if (denied) return denied
+
   // 1) consent_check (bắt buộc — P2)
   const consent = await assertConsent(c.env, pid, 'chatbot_persona')
   if (!consent.ok) return c.json(consent.error, 403)

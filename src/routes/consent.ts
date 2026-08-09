@@ -9,7 +9,7 @@ import { CONSENT_SCOPES } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
 import { json, paramOf, problem, sha256, uuid } from '../lib/util'
 import {
-  clanOfConsentRecord, clanOfPerson, clanOfRestRequest, clanOfWill,
+  clanOfPerson, clanOfRestRequest, clanOfWill,
   guardClanView, guardClanWrite, isOpenAccess, visibleClanIds
 } from '../lib/access'
 
@@ -106,13 +106,21 @@ consentRoutes.post('/consent', requireAuth, async (c) => {
   }
 
   const id = uuid()
+  let timeEndIso: string | null = null
+  if (b.timeEnd) {
+    const d = new Date(b.timeEnd)
+    if (isNaN(d.getTime())) {
+      return c.json(problem(400, 'Validation error', 'timeEnd không hợp lệ.'), 400)
+    }
+    timeEndIso = d.toISOString()
+  }
   const payload = {
     id,
     subjectPersonId: b.subjectPersonId,
     scope: b.scope.slice().sort(),
     grantees: b.grantees || [],
     timeStart: new Date().toISOString(),
-    timeEnd: b.timeEnd || null,
+    timeEnd: timeEndIso,
     signatureMethod: method
   }
   // blockchainProof: chỉ hash bản ghi, KHÔNG lưu PII lên chain (4.7.1)
@@ -124,14 +132,15 @@ consentRoutes.post('/consent', requireAuth, async (c) => {
        auto_sunset_config, right_to_rest, signature_method, signed_at, signer_ip,
        signer_device_fingerprint, video_consent_url, blockchain_tx_hash,
        blockchain_contract_address, record_hash, status)
-     VALUES (?1,?2,?3,?4,datetime('now'),?5,?6,?7,?8,datetime('now'),?9,?10,?11,?12,?13,?14,'active')`
+     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,datetime('now'),?10,?11,?12,?13,?14,?15,'active')`
   )
     .bind(
       id,
       b.subjectPersonId,
       JSON.stringify(payload.scope),
       JSON.stringify(b.grantees || []),
-      b.timeEnd || null,
+      payload.timeStart,
+      timeEndIso,
       JSON.stringify(b.autoSunset || { enabled: true, inactiveYears: 5 }),
       JSON.stringify(
         b.rightToRest || { condition: 'INHERITOR_DECISION', inheritorApprovalCount: 2 }
@@ -177,14 +186,24 @@ consentRoutes.post('/consent/:id/revoke', requireAuth, async (c) => {
   })
 })
 
-/** Verify công khai bản ghi (AC-F7: blockchain proof verify độc lập) */
+/**
+ * Chuyển thời gian DB về dạng ISO đúng format khi băm.
+ * "2026-08-09 08:39:00" (datetime('now')) → "2026-08-09T08:39:00Z"; đã ISO thì giữ nguyên.
+ */
+function toIsoForHash(v: string | null | undefined): string | null {
+  if (!v) return null
+  const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/.exec(v)
+  if (m) return `${m[1]}T${m[2]}Z`
+  return v
+}
+
+/** Verify công khai bản ghi (AC-F7: blockchain proof verify độc lập — public URL, không PII) */
 consentRoutes.get('/consent/:id/verify', async (c) => {
   const id = paramOf(c, 'id')
-  const denied = await guardClanView(c, await clanOfConsentRecord(c, id))
-  if (denied) return denied
   const r = await c.env.DB.prepare(
-    `SELECT id, subject_person_id, scope, grantees, time_start, time_end, signature_method,
-            record_hash, blockchain_tx_hash, blockchain_contract_address, status, created_at
+    `SELECT id, subject_person_id, scope, grantees, time_start, time_end,
+            signature_method, record_hash, blockchain_tx_hash,
+            blockchain_contract_address, status
        FROM consent_records WHERE id = ?`
   )
     .bind(id)
@@ -195,25 +214,31 @@ consentRoutes.get('/consent/:id/verify', async (c) => {
     subjectPersonId: r.subject_person_id,
     scope: json<string[]>(r.scope, []),
     grantees: json<any[]>(r.grantees, []),
-    timeStart: r.time_start,
-    timeEnd: r.time_end,
+    timeStart: toIsoForHash(r.time_start),
+    timeEnd: toIsoForHash(r.time_end),
     signatureMethod: r.signature_method
   }
   const recomputed = await sha256(JSON.stringify(payload))
+  // Tương thích ngược: bản ghi cũ lưu thời gian dạng SQLite → thử chuẩn hoá thêm 1 lần
+  const recomputedLegacy =
+    r.time_start && r.time_start !== toIsoForHash(r.time_start)
+      ? await sha256(JSON.stringify({ ...payload, timeStart: r.time_start }))
+      : null
+  const verified = recomputed === r.record_hash || recomputedLegacy === r.record_hash
   return c.json({
     consentId: r.id,
     status: r.status,
+    verified,
     storedHash: r.record_hash,
-    // Lưu ý: hash gốc tính lúc tạo với timeStart ISO, nên chỉ so sánh tham chiếu
-    recomputedHashOfCurrentState: recomputed,
+    recomputedHash: recomputed,
+    scope: payload.scope,
+    signatureMethod: r.signature_method,
     blockchain: {
       txHash: r.blockchain_tx_hash,
       contractAddress: r.blockchain_contract_address,
       network: 'polygon-zkevm (MVP: notary nội bộ)',
       containsPII: false
-    },
-    scope: payload.scope,
-    signatureMethod: r.signature_method
+    }
   })
 })
 
@@ -282,9 +307,48 @@ consentRoutes.post('/rest-requests/:id/approve', requireAuth, async (c) => {
       .bind(r.consent_record_id)
       .run()
     if (r.mode === 'HARD_DELETE') {
-      await c.env.DB.prepare(`DELETE FROM persona_messages WHERE person_id = ?`)
-        .bind(r.subject_person_id)
-        .run()
+      // 4.7.2 HARD_DELETE — xoá HOÀN TOÀN dữ liệu persona (cascade, 1 batch)
+      const pid = r.subject_person_id
+      const mems = await c.env.DB.prepare(
+        `SELECT id FROM memories WHERE subject_person_id = ?1 OR told_by_person_id = ?1`
+      )
+        .bind(pid)
+        .all<any>()
+      const memIds = (mems.results || []).map((m) => m.id)
+      const stmts: D1PreparedStatement[] = []
+      stmts.push(c.env.DB.prepare(`DELETE FROM persona_messages WHERE person_id = ?`).bind(pid))
+      stmts.push(
+        c.env.DB.prepare(`DELETE FROM time_capsules WHERE author_person_id = ? OR recipient_person_id = ?`).bind(
+          pid,
+          pid
+        )
+      )
+      stmts.push(c.env.DB.prepare(`DELETE FROM interview_sessions WHERE interviewee_person_id = ?`).bind(pid))
+      stmts.push(c.env.DB.prepare(`DELETE FROM digital_wills WHERE testator_person_id = ?`).bind(pid))
+      stmts.push(c.env.DB.prepare(`DELETE FROM rest_requests WHERE subject_person_id = ?`).bind(pid))
+      stmts.push(c.env.DB.prepare(`DELETE FROM consent_records WHERE subject_person_id = ?`).bind(pid))
+      stmts.push(c.env.DB.prepare(`DELETE FROM advices WHERE spoken_by_person_id = ?`).bind(pid))
+      stmts.push(c.env.DB.prepare(`DELETE FROM user_person_links WHERE person_id = ?`).bind(pid))
+      stmts.push(c.env.DB.prepare(`DELETE FROM event_persons WHERE person_id = ?`).bind(pid))
+      stmts.push(
+        c.env.DB.prepare(`DELETE FROM relationships WHERE from_person_id = ? OR to_person_id = ?`).bind(pid, pid)
+      )
+      if (memIds.length) {
+        const ph = memIds.map(() => '?').join(',')
+        stmts.push(c.env.DB.prepare(`DELETE FROM memory_persons WHERE memory_id IN (${ph})`).bind(...memIds))
+        stmts.push(c.env.DB.prepare(`DELETE FROM memory_embeddings WHERE memory_id IN (${ph})`).bind(...memIds))
+        stmts.push(
+          c.env.DB.prepare(
+            `DELETE FROM contradictions WHERE memory_a_id IN (${ph}) OR memory_b_id IN (${ph})`
+          ).bind(...memIds, ...memIds)
+        )
+        stmts.push(c.env.DB.prepare(`DELETE FROM advices WHERE source_memory_id IN (${ph})`).bind(...memIds))
+        stmts.push(
+          c.env.DB.prepare(`DELETE FROM memories WHERE subject_person_id = ?1 OR told_by_person_id = ?1`).bind(pid)
+        )
+      }
+      stmts.push(c.env.DB.prepare(`DELETE FROM persons WHERE id = ?`).bind(pid))
+      await c.env.DB.batch(stmts)
     }
     await c.env.DB.prepare(
       `UPDATE rest_requests SET status='EXECUTED', executed_at=datetime('now'), approvals=?1 WHERE id=?2`
