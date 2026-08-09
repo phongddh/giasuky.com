@@ -217,11 +217,31 @@ curl http://localhost:3000/api/health
 
 **Biến môi trường** (`.dev.vars`, đã git-ignore):
 ```
+APP_ENV=development            # 'development' = chế độ mở (sandbox/demo); thiếu hoặc khác = production nghiêm ngặt
 OPENAI_API_KEY=...
 OPENAI_BASE_URL=https://www.genspark.ai/api/llm_proxy/v1
 LLM_MODEL=gpt-5-mini
+# ALLOWED_ORIGINS=https://giasuky.com   # origin bổ sung được phép cho CORS (phân tách dấu phẩy)
 ```
 Nếu không có LLM key hợp lệ, persona chat **vẫn hoạt động an toàn**: hệ thống trả về nguyên văn câu nói đã lưu kèm trích dẫn, không bịa thêm.
+
+### Mô hình kiểm soát truy cập (bảo mật Giai đoạn 1)
+
+Mọi quyền đọc/ghi dữ liệu dòng họ đi qua `src/lib/access.ts`, 2 chế độ theo `APP_ENV`:
+
+| Chế độ | Điều kiện | Quyền truy cập |
+|---|---|---|
+| **Production** (mặc định — thiếu hoặc khác `development`) | `APP_ENV != development` | **Chỉ thành viên** (`clan_members`) của đúng dòng họ mới đọc/ghi được dữ liệu. Khách bị chặn toàn bộ. `/auth/demo` bị khoá. |
+| **Mở / sandbox** | `APP_ENV=development` | Giữ hành vi demo: khách xem được clan mẫu, ghi cần đăng nhập. `/auth/demo` hoạt động. |
+
+Các điểm chốt đã triển khai:
+
+- **Chống IDOR xuyên clan**: mọi endpoint theo resource (person, memory, event, advice, altar, ritual, interview, consent, will, rest-request, contradiction) đều resolve `clan_id` của tài nguyên rồi so với quyền của user. Không thể sửa/xoá/duyệt/thu hồi dữ liệu của dòng họ khác.
+- **Search và các danh sách** (`/search`, `/events`, `/advices`, `/consent`, `/wills`, `/rest-requests`, `/altars`, `/rituals`, `/interviews`, `/audit-logs`) lọc theo clan người dùng được phép.
+- **CSRF**: mọi POST/PATCH/PUT/DELETE có header `Origin` từ nguồn không thuộc (cùng host, `*.pages.dev`, hoặc `ALLOWED_ORIGINS`) → **403**. CORS không còn `origin:'*'`+`credentials:true` (combo bất hợp lệ).
+- **Rate limit atomic**: `checkRateLimit` dùng 1 câu UPSERT (ON CONFLICT ... DO UPDATE) — hết TOCTOU; áp dụng cho đăng nhập (10 lần/15 phút/email+IP), đăng ký (5/giờ/IP), persona chat, phỏng vấn.
+- **Email chuẩn hoá**: lowercase + trim + kiểm tra định dạng ở cả register và login.
+- **Guardrail đồng nhất giữa `/personas/:id/chat` và `/personas/:id/chat-stream`**: rate limit chung, quét đầu vào, grief-aware, lưu log — không thể bypass qua đường streaming.
 
 ## 6. Trạng thái triển khai
 
@@ -230,7 +250,7 @@ Nếu không có LLM key hợp lệ, persona chat **vẫn hoạt động an toà
 - **Trước khi deploy production cần**:
   1. `npx wrangler d1 create webapp-production` rồi thay `database_id: "local-dev-placeholder"` trong `wrangler.jsonc` bằng ID thật.
   2. `npx wrangler d1 migrations apply webapp-production` (production).
-  3. `npx wrangler pages secret put OPENAI_API_KEY`.
+  3. `npx wrangler pages secret put OPENAI_API_KEY` và `npx wrangler pages secret put APP_ENV` (giá trị `production`; không đặt → mặc định đã là production nghiêm ngặt).
   4. `npm run deploy:prod`.
 
 ## 7. Chưa hoàn thiện / bước tiếp theo
@@ -242,8 +262,9 @@ Nếu không có LLM key hợp lệ, persona chat **vẫn hoạt động an toà
 - [ ] Video call nghi lễ (mediasoup SFU) — cần server riêng, không khả thi trên Workers.
 - [ ] Tích hợp DNA lab & đối sánh quan hệ sinh học.
 - [ ] Test tự động (unit / e2e) — hiện chỉ có smoke test bằng `curl`.
+- [ ] Deploy production: set `APP_ENV=production` + kiểm tra quyền truy cập theo thành viên dòng họ (đã triển khai code, cần verify trên môi trường thật).
 
 ---
 
 **Tech Stack**: Hono 4 · TypeScript · Cloudflare Pages/Workers · Cloudflare D1 · Vite 8 · TailwindCSS (CDN) · PM2
-**Last Updated**: 2026-08-09
+**Last Updated**: 2026-08-09 (Giai đoạn 1 — bảo mật: access control, CSRF, rate limit, khoá demo, guardrail stream)

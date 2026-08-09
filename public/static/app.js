@@ -176,8 +176,8 @@ function authModal() {
     <div class="divider"></div>
     <div class="tabs"><button class="tab active" data-t="login">Đăng nhập</button><button class="tab" data-t="reg">Tạo tài khoản</button></div>
     <form id="f-login">
-      <div class="field"><label>Email</label><input name="email" type="email" value="tung.nguyen@example.com" required></div>
-      <div class="field"><label>Mật khẩu</label><input name="password" type="password" value="giasuky123" required></div>
+      <div class="field"><label>Email</label><input name="email" type="email" autocomplete="email" required></div>
+      <div class="field"><label>Mật khẩu</label><input name="password" type="password" autocomplete="current-password" required></div>
       <button class="btn block" type="submit">Đăng nhập</button>
     </form>
     <form id="f-reg" class="hide">

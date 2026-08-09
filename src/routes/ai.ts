@@ -7,11 +7,14 @@ import { streamSSE } from 'hono/streaming'
 import type { AppEnv } from '../lib/types'
 import { AI_HOSTS, INTERVIEW_TOPICS } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { json, problem, removeTone, uuid, ageOf } from '../lib/util'
+import { json, paramOf, problem, removeTone, uuid, ageOf } from '../lib/util'
 import {
   assertConsent, buildPersonaPrompt, checkRateLimit, detectGrief, embed,
   llmAvailable, llmChat, postProcessPersona, retrieveMemories, scanOutput
 } from '../lib/ai'
+import {
+  clanOfInterview, clanOfPerson, guardClanView, guardClanWrite, visibleClanIds
+} from '../lib/access'
 
 export const aiRoutes = new Hono<AppEnv>()
 
@@ -22,17 +25,17 @@ aiRoutes.get('/ai/hosts', (c) =>
 // ==================== F2 — AI INTERVIEWER ============================
 
 aiRoutes.get('/interviews', async (c) => {
-  const clanId = c.req.query('clanId') || c.var.user?.clan_id || null
   const rows = await c.env.DB.prepare(
     `SELECT s.*, p.full_name AS interviewee_name, p.photo_url AS interviewee_photo,
             p.birth_date, p.birth_place,
             (SELECT COUNT(*) FROM memories m WHERE m.interview_session_id = s.id) AS memory_count
        FROM interview_sessions s JOIN persons p ON p.id = s.interviewee_person_id
-      WHERE (?1 IS NULL OR s.clan_id = ?1) ORDER BY s.created_at DESC LIMIT 50`
+      ORDER BY s.created_at DESC LIMIT 50`
   )
-    .bind(clanId)
     .all<any>()
-  return c.json({ sessions: rows.results })
+  const visible = await visibleClanIds(c)
+  const sessions = visible ? rows.results.filter((s) => visible.has(s.clan_id)) : rows.results
+  return c.json({ sessions })
 })
 
 /** POST /v1/interviews — đặt lịch phỏng vấn (4.2.1 wizard 4 bước) */
@@ -41,6 +44,9 @@ aiRoutes.post('/interviews', requireAuth, async (c) => {
   if (!b.intervieweeId) {
     return c.json(problem(400, 'Validation error', 'Cần chọn người được phỏng vấn.'), 400)
   }
+  const clanId = await clanOfPerson(c, b.intervieweeId)
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
   // 7.9 rate limit: free 1 session/tuần
   const rl = await checkRateLimit(c.env, c.var.user!.id, 'interviews', 5, 24 * 7)
   if (!rl.ok) {
@@ -79,7 +85,7 @@ aiRoutes.post('/interviews', requireAuth, async (c) => {
 })
 
 aiRoutes.get('/interviews/:id', async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
   const s = await c.env.DB.prepare(
     `SELECT s.*, p.full_name AS interviewee_name, p.photo_url AS interviewee_photo,
             p.birth_date, p.birth_place, p.bio
@@ -89,6 +95,8 @@ aiRoutes.get('/interviews/:id', async (c) => {
     .bind(id)
     .first<any>()
   if (!s) return c.json(problem(404, 'Not found', 'Không tìm thấy buổi phỏng vấn.'), 404)
+  const denied = await guardClanView(c, s.clan_id)
+  if (denied) return denied
   const host = AI_HOSTS.find((h) => h.id === s.ai_host_id) || AI_HOSTS[0]
   const topic = INTERVIEW_TOPICS.find((t) => t.id === s.topic)
   return c.json({
@@ -110,7 +118,7 @@ aiRoutes.get('/interviews/:id', async (c) => {
  * đổi/kết thúc chủ đề nếu buồn/mệt).
  */
 aiRoutes.post('/interviews/:id/turn', requireAuth, async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
   const b = await c.req.json().catch(() => ({} as any))
   const s = await c.env.DB.prepare(
     `SELECT s.*, p.full_name AS name, p.birth_date, p.birth_place, p.bio
@@ -120,6 +128,8 @@ aiRoutes.post('/interviews/:id/turn', requireAuth, async (c) => {
     .bind(id)
     .first<any>()
   if (!s) return c.json(problem(404, 'Not found', 'Không tìm thấy buổi phỏng vấn.'), 404)
+  const denied = await guardClanWrite(c, s.clan_id)
+  if (denied) return denied
 
   const turns = json<any[]>(s.transcript_raw, [])
   const emotions = json<any[]>(s.emotion_timeline, [])
@@ -222,7 +232,10 @@ aiRoutes.post('/interviews/:id/turn', requireAuth, async (c) => {
 
 /** Kết thúc buổi phỏng vấn → chuyển sang PENDING_REVIEW */
 aiRoutes.post('/interviews/:id/end', requireAuth, async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
+  const clanId = await clanOfInterview(c, id)
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
   await c.env.DB.prepare(
     `UPDATE interview_sessions SET status='PENDING_REVIEW', ended_at=datetime('now') WHERE id=?`
   )
@@ -238,12 +251,14 @@ aiRoutes.post('/interviews/:id/end', requireAuth, async (c) => {
  * (danh từ riêng: tên người, địa danh) như 4.2.3.
  */
 aiRoutes.post('/interviews/:id/approve', requireAuth, async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
   const b = await c.req.json().catch(() => ({} as any))
   const s = await c.env.DB.prepare(`SELECT * FROM interview_sessions WHERE id = ?`)
     .bind(id)
     .first<any>()
   if (!s) return c.json(problem(404, 'Not found', 'Không tìm thấy buổi phỏng vấn.'), 404)
+  const denied = await guardClanWrite(c, s.clan_id)
+  if (denied) return denied
 
   const turns = json<any[]>(s.transcript_raw, [])
   // segments: mảng chỉ số turn được duyệt; nếu không truyền → duyệt hết lời kể
@@ -298,13 +313,15 @@ aiRoutes.post('/interviews/:id/approve', requireAuth, async (c) => {
 // ==================== Persona Chat (7.5 RAG) =========================
 
 aiRoutes.get('/personas/:personId/status', async (c) => {
-  const pid = c.req.param('personId')
+  const pid = paramOf(c, 'personId')
   const p = await c.env.DB.prepare(
     `SELECT id, full_name, birth_place, is_alive, photo_url, bio FROM persons WHERE id = ?`
   )
     .bind(pid)
     .first<any>()
   if (!p) return c.json(problem(404, 'Not found', 'Không tìm thấy người này.'), 404)
+  const denied = await guardClanView(c, await clanOfPerson(c, pid))
+  if (denied) return denied
   const consent = await assertConsent(c.env, pid, 'chatbot_persona')
   const mc = await c.env.DB.prepare(
     `SELECT COUNT(*) AS n FROM memories WHERE (subject_person_id=?1 OR told_by_person_id=?1) AND status='APPROVED'`
@@ -328,7 +345,9 @@ aiRoutes.get('/personas/:personId/status', async (c) => {
 })
 
 aiRoutes.get('/personas/:personId/messages', async (c) => {
-  const pid = c.req.param('personId')
+  const pid = paramOf(c, 'personId')
+  const denied = await guardClanView(c, await clanOfPerson(c, pid))
+  if (denied) return denied
   const rows = await c.env.DB.prepare(
     `SELECT id, role, content, citations, blocked, block_reason, created_at
        FROM persona_messages WHERE person_id=?1 AND (user_id=?2 OR ?2 IS NULL)
@@ -347,10 +366,15 @@ aiRoutes.get('/personas/:personId/messages', async (c) => {
  *        → anti-scam scan → citations → lưu log.
  */
 aiRoutes.post('/personas/:personId/chat', requireAuth, async (c) => {
-  const pid = c.req.param('personId')
+  const pid = paramOf(c, 'personId')
   const b = await c.req.json().catch(() => ({} as any))
   const message = String(b.message || '').trim()
   if (!message) return c.json(problem(400, 'Validation error', 'Thiếu nội dung câu hỏi.'), 400)
+
+  // 0) access control — người chat phải thuộc dòng họ của nhân vật (P2 + chống IDOR)
+  const clanId = await clanOfPerson(c, pid)
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
 
   // 1) consent_check (bắt buộc — P2)
   const consent = await assertConsent(c.env, pid, 'chatbot_persona')
@@ -495,34 +519,158 @@ aiRoutes.post('/personas/:personId/chat', requireAuth, async (c) => {
   })
 })
 
-/** Streaming SSE variant (spec: chat trả streaming) */
+/**
+ * POST /v1/personas/:personId/chat-stream — RAG streaming (SSE).
+ * Cùng chuỗi guardrail với /chat: consent_check → rate_limit → scan đầu vào
+ * → grief-aware → retrieve → prompt → LLM → post-process → lưu log.
+ */
 aiRoutes.post('/personas/:personId/chat-stream', requireAuth, async (c) => {
-  const pid = c.req.param('personId')
+  const pid = paramOf(c, 'personId')
   const b = await c.req.json().catch(() => ({} as any))
   const message = String(b.message || '').trim()
+  if (!message) return c.json(problem(400, 'Validation error', 'Thiếu nội dung câu hỏi.'), 400)
+
+  const person = await c.env.DB.prepare(
+    `SELECT id, full_name, birth_place, is_alive FROM persons WHERE id = ?`
+  )
+    .bind(pid)
+    .first<any>()
+  if (!person) return c.json(problem(404, 'Not found', 'Không tìm thấy người này.'), 404)
+
+  // 1) consent_check (bắt buộc — P2)
   const consent = await assertConsent(c.env, pid, 'chatbot_persona')
   if (!consent.ok) return c.json(consent.error, 403)
-  const person = await c.env.DB.prepare(`SELECT * FROM persons WHERE id=?`).bind(pid).first<any>()
+
+  // 2) rate limit (7.9) — dùng chung hạn mức với /chat để không bypass
+  const rl = await checkRateLimit(c.env, c.var.user!.id, 'persona_chat', 200, 24)
+  if (!rl.ok) {
+    return c.json(problem(429, 'Rate limited', 'Đã hết lượt trò chuyện hôm nay.'), 429)
+  }
+
+  // 3) grief-aware (P3 / 11.7)
+  const grief = detectGrief(message)
+
+  await c.env.DB.prepare(
+    `INSERT INTO persona_messages (id, person_id, user_id, role, content) VALUES (?1,?2,?3,'user',?4)`
+  )
+    .bind(uuid(), pid, c.var.user!.id, message)
+    .run()
+
+  // 4) quét CẢ câu hỏi đi vào (11.6) — như /chat
+  const inScan = scanOutput(message)
+  if (inScan.blocked) {
+    const warn =
+      `Câu hỏi này đã bị chặn theo hàng rào an toàn 11.6: persona của ${person.full_name} ` +
+      `không bao giờ nói về tiền, số tài khoản, mã OTP, mật khẩu hay giấy tờ tùy thân.\n\n` +
+      `Nếu có ai đang dùng giọng nói hoặc hình ảnh người thân đã mất để hỏi bạn những điều đó, ` +
+      `đây gần như chắc chắn là lừa đảo. Hãy gọi trực tiếp cho người trong nhà để kiểm chứng.`
+    const mid = uuid()
+    await c.env.DB.prepare(
+      `INSERT INTO persona_messages (id, person_id, user_id, role, content, citations, blocked, block_reason)
+       VALUES (?1,?2,?3,'persona',?4,'[]',1,?5)`
+    )
+      .bind(mid, pid, c.var.user!.id, warn, inScan.reason || null)
+      .run()
+    await audit(c, 'persona.chat.blocked', 'person', pid, {
+      direction: 'input',
+      labels: inScan.labels,
+      stream: true
+    })
+    return c.json({
+      reply: warn,
+      citations: [],
+      citationDetails: [],
+      blocked: true,
+      blockReason: inScan.reason,
+      retrieved: 0,
+      grief: grief.flagged ? griefNotice(grief.severe) : null
+    })
+  }
+
+  // 5) retrieve + consent filter
   const memories = await retrieveMemories(c.env, pid, message, 5)
+
+  // 7.6 quy tắc 1: không có memory match → KHÔNG cho LLM trả lời
+  if (!memories.length) {
+    const text = `Chuyện đó không có trong những gì gia đình đã lưu lại, nên ${person.full_name} không nhớ rõ được cháu ạ. Cháu thử hỏi thêm người trong nhà, rồi ghi vào Hồi ký để lần sau còn có mà kể.`
+    const mid = uuid()
+    await c.env.DB.prepare(
+      `INSERT INTO persona_messages (id, person_id, user_id, role, content, citations) VALUES (?1,?2,?3,'persona',?4,'[]')`
+    )
+      .bind(mid, pid, c.var.user!.id, text)
+      .run()
+    await audit(c, 'persona.chat', 'person', pid, { noMatch: true, stream: true })
+    return c.json({
+      reply: text,
+      citations: [],
+      noMatch: true,
+      grief: grief.flagged ? griefNotice(grief.severe) : null
+    })
+  }
+
+  const sys = buildPersonaPrompt(
+    { full_name: person.full_name, birth_place: person.birth_place, is_alive: person.is_alive },
+    memories
+  )
+  const out = await llmChat(
+    c.env,
+    [
+      { role: 'system', content: sys },
+      ...(grief.flagged
+        ? [
+            {
+              role: 'system' as const,
+              content:
+                'Người hỏi đang có dấu hiệu đau buồn. Hãy mở đầu bằng một câu an ủi ngắn, ấm áp, rồi mới kể chuyện.'
+            }
+          ]
+        : []),
+      { role: 'user', content: message }
+    ],
+    { maxTokens: 400 }
+  )
+  const raw = out || `Chuyện này ông bà có kể lại thế này: "${memories[0].content.slice(0, 400)}" [nguồn: MEM-1]`
+  const pp = postProcessPersona(raw, memories)
+
+  const mid = uuid()
+  await c.env.DB.prepare(
+    `INSERT INTO persona_messages (id, person_id, user_id, role, content, citations, blocked, block_reason)
+     VALUES (?1,?2,?3,'persona',?4,?5,?6,?7)`
+  )
+    .bind(
+      mid, pid, c.var.user!.id, pp.text, JSON.stringify(pp.citations),
+      pp.blocked ? 1 : 0, pp.blockReason || null
+    )
+    .run()
+  await audit(c, 'persona.chat', 'person', pid, {
+    citations: pp.citations.length,
+    blocked: pp.blocked,
+    grief: grief.flagged,
+    stream: true
+  })
+
+  const citationDetails = memories
+    .filter((m) => pp.citations.includes(m.id))
+    .map((m) => ({ id: m.id, snippet: m.content.slice(0, 160), score: Math.round(m.score * 100) / 100 }))
+
   return streamSSE(c, async (stream) => {
-    if (!memories.length) {
-      await stream.writeSSE({
-        data: JSON.stringify({ type: 'done', text: 'Không có ký ức phù hợp.', citations: [] })
-      })
-      return
-    }
-    const sys = buildPersonaPrompt(person, memories)
-    const out =
-      (await llmChat(c.env, [{ role: 'system', content: sys }, { role: 'user', content: message }], {
-        maxTokens: 400
-      })) || memories[0].content
-    const pp = postProcessPersona(out, memories)
+    await stream.writeSSE({
+      data: JSON.stringify({ type: 'start', retrieved: memories.length, remaining: rl.remaining })
+    })
     for (const chunk of pp.text.match(/.{1,24}/gs) || []) {
       await stream.writeSSE({ data: JSON.stringify({ type: 'chunk', text: chunk }) })
       await new Promise((r) => setTimeout(r, 30))
     }
     await stream.writeSSE({
-      data: JSON.stringify({ type: 'done', citations: pp.citations, blocked: pp.blocked })
+      data: JSON.stringify({
+        type: 'done',
+        citations: pp.citations,
+        citationDetails,
+        blocked: pp.blocked,
+        blockReason: pp.blockReason,
+        grief: grief.flagged ? griefNotice(grief.severe) : null,
+        watermark: 'AudioSeal (áp dụng khi tổng hợp giọng nói)'
+      })
     })
   })
 })

@@ -7,7 +7,11 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { CONSENT_SCOPES } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { json, problem, sha256, uuid } from '../lib/util'
+import { json, paramOf, problem, sha256, uuid } from '../lib/util'
+import {
+  clanOfConsentRecord, clanOfPerson, clanOfRestRequest, clanOfWill,
+  guardClanView, guardClanWrite, isOpenAccess, visibleClanIds
+} from '../lib/access'
 
 export const consentRoutes = new Hono<AppEnv>()
 
@@ -25,16 +29,16 @@ consentRoutes.get('/consent/scopes', (c) =>
 )
 
 consentRoutes.get('/consent', async (c) => {
-  const clanId = c.req.query('clanId') || c.var.user?.clan_id || null
   const rows = await c.env.DB.prepare(
-    `SELECT cr.*, p.full_name AS subject_name, p.photo_url AS subject_photo, p.is_alive
+    `SELECT cr.*, p.full_name AS subject_name, p.photo_url AS subject_photo, p.is_alive,
+            p.clan_id AS clan_id
        FROM consent_records cr JOIN persons p ON p.id = cr.subject_person_id
-      WHERE (?1 IS NULL OR p.clan_id = ?1) ORDER BY cr.created_at DESC`
-  )
-    .bind(clanId)
-    .all<any>()
+      ORDER BY cr.created_at DESC`
+  ).all<any>()
+  const visible = await visibleClanIds(c)
+  const records = visible ? rows.results.filter((r) => visible.has(r.clan_id)) : rows.results
   return c.json({
-    records: (rows.results || []).map((r) => ({
+    records: (records || []).map((r) => ({
       ...r,
       scope: json<string[]>(r.scope, []),
       grantees: json<any[]>(r.grantees, []),
@@ -45,7 +49,9 @@ consentRoutes.get('/consent', async (c) => {
 })
 
 consentRoutes.get('/consent/subject/:personId', async (c) => {
-  const pid = c.req.param('personId')
+  const pid = paramOf(c, 'personId')
+  const denied = await guardClanView(c, await clanOfPerson(c, pid))
+  if (denied) return denied
   const rows = await c.env.DB.prepare(
     `SELECT * FROM consent_records WHERE subject_person_id = ? ORDER BY created_at DESC`
   )
@@ -71,6 +77,9 @@ consentRoutes.post('/consent', requireAuth, async (c) => {
   if (!b.subjectPersonId || !Array.isArray(b.scope) || !b.scope.length) {
     return c.json(problem(400, 'Validation error', 'Cần subjectPersonId và ít nhất 1 scope.'), 400)
   }
+  // Chống IDOR: chỉ thành viên dòng họ của người được đồng thuận mới tạo được bản ghi
+  const denied = await guardClanWrite(c, await clanOfPerson(c, b.subjectPersonId))
+  if (denied) return denied
   const invalid = b.scope.filter((s: string) => !CONSENT_SCOPES.includes(s as any))
   if (invalid.length) {
     return c.json(problem(400, 'Validation error', `Scope không hợp lệ: ${invalid.join(', ')}`), 400)
@@ -147,10 +156,12 @@ consentRoutes.post('/consent', requireAuth, async (c) => {
 
 /** 11.5.4 Revoke → mọi AI feature liên quan bị disable (AC: <5 phút; ở đây tức thời) */
 consentRoutes.post('/consent/:id/revoke', requireAuth, async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
   const b = await c.req.json().catch(() => ({} as any))
   const rec = await c.env.DB.prepare(`SELECT * FROM consent_records WHERE id = ?`).bind(id).first<any>()
   if (!rec) return c.json(problem(404, 'Not found', 'Không tìm thấy bản ghi đồng thuận.'), 404)
+  const denied = await guardClanWrite(c, await clanOfPerson(c, rec.subject_person_id))
+  if (denied) return denied
   await c.env.DB.prepare(
     `UPDATE consent_records SET status='revoked', revoked_at=datetime('now'), revoked_reason=?1 WHERE id=?2`
   )
@@ -168,7 +179,9 @@ consentRoutes.post('/consent/:id/revoke', requireAuth, async (c) => {
 
 /** Verify công khai bản ghi (AC-F7: blockchain proof verify độc lập) */
 consentRoutes.get('/consent/:id/verify', async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
+  const denied = await guardClanView(c, await clanOfConsentRecord(c, id))
+  if (denied) return denied
   const r = await c.env.DB.prepare(
     `SELECT id, subject_person_id, scope, grantees, time_start, time_end, signature_method,
             record_hash, blockchain_tx_hash, blockchain_contract_address, status, created_at
@@ -207,12 +220,14 @@ consentRoutes.get('/consent/:id/verify', async (c) => {
 // ------------------------ 4.7.2 Right to Rest -------------------------
 consentRoutes.get('/rest-requests', async (c) => {
   const rows = await c.env.DB.prepare(
-    `SELECT rr.*, p.full_name AS subject_name FROM rest_requests rr
+    `SELECT rr.*, p.full_name AS subject_name, p.clan_id AS clan_id FROM rest_requests rr
        JOIN persons p ON p.id = rr.subject_person_id ORDER BY rr.created_at DESC`
   ).all<any>()
-  return c.json({
-    requests: (rows.results || []).map((r) => ({ ...r, approvals: json<string[]>(r.approvals, []) }))
-  })
+  const visible = await visibleClanIds(c)
+  const requests = (visible ? rows.results.filter((r) => visible.has(r.clan_id)) : rows.results).map(
+    (r) => ({ ...r, approvals: json<string[]>(r.approvals, []) })
+  )
+  return c.json({ requests })
 })
 
 consentRoutes.post('/rest-requests', requireAuth, async (c) => {
@@ -224,6 +239,8 @@ consentRoutes.post('/rest-requests', requireAuth, async (c) => {
     .bind(b.consentRecordId)
     .first<any>()
   if (!rec) return c.json(problem(404, 'Not found', 'Không tìm thấy bản ghi đồng thuận.'), 404)
+  const denied = await guardClanWrite(c, await clanOfPerson(c, rec.subject_person_id))
+  if (denied) return denied
   const rtr = json<any>(rec.right_to_rest, { inheritorApprovalCount: 2 })
   const id = uuid()
   await c.env.DB.prepare(
@@ -245,9 +262,11 @@ consentRoutes.post('/rest-requests', requireAuth, async (c) => {
 })
 
 consentRoutes.post('/rest-requests/:id/approve', requireAuth, async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
   const r = await c.env.DB.prepare(`SELECT * FROM rest_requests WHERE id = ?`).bind(id).first<any>()
   if (!r) return c.json(problem(404, 'Not found', 'Không tìm thấy yêu cầu.'), 404)
+  const denied = await guardClanWrite(c, await clanOfRestRequest(c, id))
+  if (denied) return denied
   if (r.status !== 'PENDING') return c.json({ ok: true, status: r.status })
   const approvals = new Set(json<string[]>(r.approvals, []))
   approvals.add(c.var.user!.id)
@@ -283,23 +302,19 @@ consentRoutes.post('/rest-requests/:id/approve', requireAuth, async (c) => {
 
 // ------------------------ 4.7.3 Digital Will --------------------------
 consentRoutes.get('/wills', async (c) => {
-  const clanId = c.req.query('clanId') || c.var.user?.clan_id || null
   const rows = await c.env.DB.prepare(
-    `SELECT w.*, p.full_name AS testator_name FROM digital_wills w
-       JOIN persons p ON p.id = w.testator_person_id
-      WHERE (?1 IS NULL OR p.clan_id = ?1) ORDER BY w.created_at DESC`
-  )
-    .bind(clanId)
-    .all<any>()
-  return c.json({
-    wills: (rows.results || []).map((w) => ({
-      ...w,
-      witness_ids: json<string[]>(w.witness_ids, []),
-      inheritors: json<any[]>(w.inheritors, []),
-      post_mortem_instructions: json<any>(w.post_mortem_instructions, {}),
-      legal_review: json<any>(w.legal_review, {})
-    }))
-  })
+    `SELECT w.*, p.full_name AS testator_name, p.clan_id AS clan_id FROM digital_wills w
+       JOIN persons p ON p.id = w.testator_person_id ORDER BY w.created_at DESC`
+  ).all<any>()
+  const visible = await visibleClanIds(c)
+  const wills = (visible ? rows.results.filter((w) => visible.has(w.clan_id)) : rows.results).map((w) => ({
+    ...w,
+    witness_ids: json<string[]>(w.witness_ids, []),
+    inheritors: json<any[]>(w.inheritors, []),
+    post_mortem_instructions: json<any>(w.post_mortem_instructions, {}),
+    legal_review: json<any>(w.legal_review, {})
+  }))
+  return c.json({ wills })
 })
 
 consentRoutes.post('/wills', requireAuth, async (c) => {
@@ -307,6 +322,8 @@ consentRoutes.post('/wills', requireAuth, async (c) => {
   if (!b.testatorPersonId) {
     return c.json(problem(400, 'Validation error', 'Cần testatorPersonId.'), 400)
   }
+  const denied = await guardClanWrite(c, await clanOfPerson(c, b.testatorPersonId))
+  if (denied) return denied
   const witnesses: string[] = b.witnessIds || []
   if (b.status === 'signed' && witnesses.length < 2) {
     return c.json(
@@ -341,10 +358,12 @@ consentRoutes.post('/wills', requireAuth, async (c) => {
 
 /** 4.7.4 Death Verification — manual + 2 nhân chứng → activate will */
 consentRoutes.post('/wills/:id/activate', requireAuth, async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
   const b = await c.req.json().catch(() => ({} as any))
   const w = await c.env.DB.prepare(`SELECT * FROM digital_wills WHERE id = ?`).bind(id).first<any>()
   if (!w) return c.json(problem(404, 'Not found', 'Không tìm thấy di chúc số.'), 404)
+  const denied = await guardClanWrite(c, await clanOfWill(c, id))
+  if (denied) return denied
   const witnesses = json<string[]>(w.witness_ids, [])
   const method = b.method || 'MANUAL_WITNESS'
   if (method === 'MANUAL_WITNESS' && (witnesses.length < 2 || !b.deathCertificateUrl)) {
@@ -386,10 +405,22 @@ consentRoutes.post('/wills/:id/activate', requireAuth, async (c) => {
 
 /** 6.3.4 Audit trail viewer — immutable log */
 consentRoutes.get('/audit-logs', requireAuth, async (c) => {
+  // Chế độ nghiêm ngặt: chỉ thấy log của chính mình + thành viên cùng dòng họ
+  // (log chứa IP/user-agent của người khác).
+  let scopeSql = ''
+  const args: string[] = []
+  if (!isOpenAccess(c)) {
+    scopeSql = `WHERE a.actor_user_id = ?1 OR a.actor_user_id IN (
+                  SELECT user_id FROM clan_members WHERE clan_id = ?2)`
+    args.push(c.var.user!.id, c.var.user!.clan_id || '')
+  }
   const rows = await c.env.DB.prepare(
     `SELECT a.*, u.full_name AS actor_name FROM audit_logs a
        LEFT JOIN users u ON u.id = a.actor_user_id
+       ${scopeSql}
       ORDER BY a.created_at DESC LIMIT 200`
-  ).all()
+  )
+    .bind(...args)
+    .all()
   return c.json({ logs: rows.results })
 })

@@ -3,17 +3,37 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { hashPassword, problem, uuid, verifyPassword } from '../lib/util'
 import { audit, createSession, destroySession, requireAuth } from '../lib/auth'
+import { isOpenAccess } from '../lib/access'
+import { checkRateLimit } from '../lib/ai'
 
 export const authRoutes = new Hono<AppEnv>()
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+function normalizeEmail(email: unknown): string {
+  return String(email || '').trim().toLowerCase()
+}
+
+function clientIp(c: any): string {
+  return c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'unknown'
+}
+
 authRoutes.post('/register', async (c) => {
   const body = await c.req.json().catch(() => ({} as any))
-  const { email, password, full_name, phone } = body
+  const email = normalizeEmail(body.email)
+  const { password, full_name, phone } = body
   if (!email || !password || !full_name) {
     return c.json(problem(400, 'Validation error', 'Cần email, mật khẩu và họ tên.'), 400)
   }
+  if (!EMAIL_RE.test(email)) {
+    return c.json(problem(400, 'Validation error', 'Email không hợp lệ.'), 400)
+  }
   if (String(password).length < 6) {
     return c.json(problem(400, 'Validation error', 'Mật khẩu tối thiểu 6 ký tự.'), 400)
+  }
+  const rl = await checkRateLimit(c.env, 'auth', `register:${clientIp(c)}`, 5, 1)
+  if (!rl.ok) {
+    return c.json(problem(429, 'Rate limited', 'Quá nhiều yêu cầu tạo tài khoản. Vui lòng thử lại sau.'), 429)
   }
   const exists = await c.env.DB.prepare(`SELECT id FROM users WHERE email = ?`)
     .bind(email)
@@ -38,10 +58,18 @@ authRoutes.post('/register', async (c) => {
 
 authRoutes.post('/login', async (c) => {
   const { email, password } = await c.req.json().catch(() => ({} as any))
+  const normalized = normalizeEmail(email)
+  const rl = await checkRateLimit(c.env, 'auth', `login:${normalized}:${clientIp(c)}`, 10, 0.25)
+  if (!rl.ok) {
+    return c.json(
+      problem(429, 'Rate limited', 'Quá nhiều lần đăng nhập thất bại liên tiếp. Vui lòng thử lại sau 15 phút.'),
+      429
+    )
+  }
   const u = await c.env.DB.prepare(
     `SELECT id, hashed_password, full_name FROM users WHERE email = ? AND is_deleted = 0`
   )
-    .bind(email || '')
+    .bind(normalized)
     .first<any>()
   if (!u || !(await verifyPassword(password || '', u.hashed_password))) {
     return c.json(problem(401, 'Unauthorized', 'Email hoặc mật khẩu không đúng.'), 401)
@@ -51,8 +79,15 @@ authRoutes.post('/login', async (c) => {
   return c.json({ id: u.id, full_name: u.full_name })
 })
 
-/** Demo login nhanh (alpha test 20 gia đình — spec 15.2) */
+/**
+ * Demo login nhanh (alpha test 20 gia đình — spec 15.2).
+ * CHỈ khả dụng ở chế độ mở (APP_ENV=development). Trong production endpoint bị khoá:
+ * tài khoản demo public không mật khẩu chính là backdoor.
+ */
 authRoutes.post('/demo', async (c) => {
+  if (!isOpenAccess(c)) {
+    return c.json(problem(403, 'Forbidden', 'Tài khoản demo chỉ khả dụng ở môi trường phát triển.'), 403)
+  }
   const u = await c.env.DB.prepare(
     `SELECT id, full_name FROM users WHERE email = 'tung.nguyen@example.com'`
   ).first<any>()

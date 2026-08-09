@@ -7,22 +7,24 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { RELIGION_THEMES } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { json, problem, uuid } from '../lib/util'
+import { json, paramOf, problem, uuid } from '../lib/util'
 import { formatLunar, majorLunarHolidays, nextAnniversary, solarToLunar, lunarToSolar } from '../lib/lunar'
+import {
+  clanOfAltar, clanOfRitual, guardClanView, guardClanWrite, isOpenAccess, resolveClanId, visibleClanIds
+} from '../lib/access'
 
 export const ritualRoutes = new Hono<AppEnv>()
 
 // ==================== F1 — DIGITAL ALTAR ============================
 
 ritualRoutes.get('/altars', async (c) => {
-  const clanId = c.req.query('clanId') || c.var.user?.clan_id || null
   const rows = await c.env.DB.prepare(
-    `SELECT * FROM altars WHERE (?1 IS NULL OR clan_id = ?1) ORDER BY created_at`
-  )
-    .bind(clanId)
-    .all<any>()
+    `SELECT * FROM altars ORDER BY created_at`
+  ).all<any>()
+  const visible = await visibleClanIds(c)
+  const all = visible ? rows.results.filter((a) => visible.has(a.clan_id)) : rows.results
   const altars = []
-  for (const a of rows.results || []) {
+  for (const a of all) {
     const ids = json<string[]>(a.subject_person_ids, [])
     let subjects: any[] = []
     if (ids.length) {
@@ -51,9 +53,11 @@ ritualRoutes.get('/altars', async (c) => {
 })
 
 ritualRoutes.get('/altars/:id', async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
   const a = await c.env.DB.prepare(`SELECT * FROM altars WHERE id = ?`).bind(id).first<any>()
   if (!a) return c.json(problem(404, 'Not found', 'Không tìm thấy bàn thờ.'), 404)
+  const denied = await guardClanView(c, a.clan_id)
+  if (denied) return denied
   const ids = json<string[]>(a.subject_person_ids, [])
   let subjects: any[] = []
   if (ids.length) {
@@ -95,6 +99,12 @@ ritualRoutes.post('/altars', requireAuth, async (c) => {
   if (!b.name || !Array.isArray(b.subjectPersonIds) || !b.subjectPersonIds.length) {
     return c.json(problem(400, 'Validation error', 'Cần tên bàn thờ và ít nhất 1 người được thờ.'), 400)
   }
+  const clanId = b.clan_id || c.var.user!.clan_id || null
+  if (!clanId) {
+    return c.json(problem(400, 'Validation error', 'Cần clan_id (dòng họ của bàn thờ).'), 400)
+  }
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
   const theme = RELIGION_THEMES.find((t) => t.id === b.religionTheme)?.id || 'Phat'
   const id = uuid()
   await c.env.DB.prepare(
@@ -122,7 +132,9 @@ ritualRoutes.post('/altars', requireAuth, async (c) => {
 })
 
 ritualRoutes.patch('/altars/:id', requireAuth, async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
+  const denied = await guardClanWrite(c, await clanOfAltar(c, id))
+  if (denied) return denied
   const b = await c.req.json().catch(() => ({} as any))
   const sets: string[] = []
   const vals: any[] = []
@@ -151,6 +163,17 @@ ritualRoutes.patch('/altars/:id', requireAuth, async (c) => {
  */
 ritualRoutes.post('/ritual-events', async (c) => {
   const b = await c.req.json().catch(() => ({} as any))
+  // Chống spam/gây nhiễu xuyên clan: chế độ nghiêm ngặt yêu cầu đăng nhập
+  // và là thành viên dòng họ sở hữu bàn thờ/buổi lễ.
+  if (!isOpenAccess(c)) {
+    const clanId = b.altarId
+      ? await clanOfAltar(c, b.altarId)
+      : b.ritualId
+        ? await clanOfRitual(c, b.ritualId)
+        : null
+    const denied = await guardClanWrite(c, clanId)
+    if (denied) return denied
+  }
   const type = ['INCENSE', 'FLOWER', 'OFFERING', 'PRAYER', 'CANDLE', 'JOIN', 'LEAVE'].includes(b.type)
     ? b.type
     : 'INCENSE'
@@ -184,6 +207,15 @@ ritualRoutes.post('/ritual-events', async (c) => {
 ritualRoutes.get('/ritual-events/stream', async (c) => {
   const altarId = c.req.query('altarId')
   const ritualId = c.req.query('ritualId')
+  if (!isOpenAccess(c)) {
+    const clanId = altarId
+      ? await clanOfAltar(c, altarId)
+      : ritualId
+        ? await clanOfRitual(c, ritualId)
+        : null
+    const denied = await guardClanView(c, clanId)
+    if (denied) return denied
+  }
   const since = c.req.query('since') || '1970-01-01 00:00:00'
   const rows = await c.env.DB.prepare(
     `SELECT re.*, u.full_name AS user_name FROM ritual_events re
@@ -211,7 +243,6 @@ ritualRoutes.get('/ritual-events/stream', async (c) => {
 // ==================== F6 — RITUAL SYNC ==============================
 
 ritualRoutes.get('/rituals', async (c) => {
-  const clanId = c.req.query('clanId') || c.var.user?.clan_id || null
   const rows = await c.env.DB.prepare(
     `SELECT r.*, p.full_name AS subject_name, a.name AS altar_name,
             (SELECT COUNT(*) FROM ritual_participants rp WHERE rp.ritual_id = r.id AND rp.rsvp='YES') AS yes_count,
@@ -219,13 +250,12 @@ ritualRoutes.get('/rituals', async (c) => {
        FROM rituals r
        LEFT JOIN persons p ON p.id = r.subject_person_id
        LEFT JOIN altars a ON a.id = r.altar_id
-      WHERE (?1 IS NULL OR r.clan_id = ?1)
       ORDER BY r.scheduled_at`
-  )
-    .bind(clanId)
-    .all<any>()
+  ).all<any>()
+  const visible = await visibleClanIds(c)
+  const rowsFinal = visible ? rows.results.filter((r) => visible.has(r.clan_id)) : rows.results
   const now = Date.now()
-  const rituals = (rows.results || []).map((r) => {
+  const rituals = (rowsFinal || []).map((r) => {
     const t = new Date(r.scheduled_at).getTime()
     const diffMs = t - now
     return {
@@ -252,6 +282,12 @@ ritualRoutes.get('/rituals', async (c) => {
 ritualRoutes.post('/rituals', requireAuth, async (c) => {
   const b = await c.req.json().catch(() => ({} as any))
   if (!b.title) return c.json(problem(400, 'Validation error', 'Cần tiêu đề buổi lễ.'), 400)
+  const clanId = b.clan_id || c.var.user!.clan_id || null
+  if (!clanId) {
+    return c.json(problem(400, 'Validation error', 'Cần clan_id (dòng họ của buổi lễ).'), 400)
+  }
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
   let scheduledAt = b.scheduledAt
   let lunarDay = b.lunarDay ?? null
   let lunarMonth = b.lunarMonth ?? null
@@ -296,7 +332,7 @@ ritualRoutes.post('/rituals', requireAuth, async (c) => {
 })
 
 ritualRoutes.get('/rituals/:id', async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
   const r = await c.env.DB.prepare(
     `SELECT r.*, p.full_name AS subject_name, p.photo_url AS subject_photo,
             a.name AS altar_name, a.religion_theme, a.horizontal_scroll_text
@@ -308,6 +344,8 @@ ritualRoutes.get('/rituals/:id', async (c) => {
     .bind(id)
     .first<any>()
   if (!r) return c.json(problem(404, 'Not found', 'Không tìm thấy buổi lễ.'), 404)
+  const denied = await guardClanView(c, r.clan_id)
+  if (denied) return denied
   const [parts, log] = await Promise.all([
     c.env.DB.prepare(
       `SELECT rp.*, u.full_name, u.avatar_url FROM ritual_participants rp
@@ -340,7 +378,9 @@ ritualRoutes.get('/rituals/:id', async (c) => {
 })
 
 ritualRoutes.post('/rituals/:id/rsvp', requireAuth, async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
+  const denied = await guardClanWrite(c, await clanOfRitual(c, id))
+  if (denied) return denied
   const b = await c.req.json().catch(() => ({} as any))
   const rsvp = ['YES', 'NO', 'MAYBE'].includes(b.rsvp) ? b.rsvp : 'YES'
   await c.env.DB.prepare(
@@ -353,7 +393,9 @@ ritualRoutes.post('/rituals/:id/rsvp', requireAuth, async (c) => {
 })
 
 ritualRoutes.post('/rituals/:id/join', requireAuth, async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
+  const denied = await guardClanWrite(c, await clanOfRitual(c, id))
+  if (denied) return denied
   await c.env.DB.prepare(
     `INSERT INTO ritual_participants (ritual_id, user_id, rsvp, joined_at)
      VALUES (?1,?2,'YES',datetime('now'))
@@ -375,7 +417,9 @@ ritualRoutes.post('/rituals/:id/join', requireAuth, async (c) => {
 })
 
 ritualRoutes.post('/rituals/:id/complete', requireAuth, async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
+  const denied = await guardClanWrite(c, await clanOfRitual(c, id))
+  if (denied) return denied
   await c.env.DB.prepare(`UPDATE rituals SET status='COMPLETED' WHERE id=?`).bind(id).run()
   const summary = await c.env.DB.prepare(
     `SELECT type, COUNT(*) AS n FROM ritual_events WHERE ritual_id=? GROUP BY type`
@@ -388,7 +432,8 @@ ritualRoutes.post('/rituals/:id/complete', requireAuth, async (c) => {
 
 /** Lịch âm: ngày hôm nay + lễ tiết + giỗ trong họ (Ritual Center) */
 ritualRoutes.get('/lunar/calendar', async (c) => {
-  const clanId = c.req.query('clanId') || c.var.user?.clan_id || null
+  const clanId = await resolveClanId(c)
+  if (!clanId) return c.json(problem(403, 'Forbidden', 'Không có dòng họ nào được phép truy cập.'), 403)
   const today = new Date(Date.now() + 7 * 3600 * 1000)
   const lunarToday = solarToLunar(today.getUTCDate(), today.getUTCMonth() + 1, today.getUTCFullYear())
   const deceased = await c.env.DB.prepare(
@@ -436,7 +481,7 @@ ritualRoutes.get('/lunar/convert', (c) => {
  * và cảnh báo khi ảnh quá mờ (4.1.6: không tự tô màu để tránh bịa nét mặt).
  */
 ritualRoutes.post('/media/:mediaId/restore-photo', requireAuth, async (c) => {
-  const mediaId = c.req.param('mediaId')
+  const mediaId = paramOf(c, 'mediaId')
   const b = await c.req.json().catch(() => ({} as any))
   await audit(c, 'photo.restore.request', 'media', mediaId, b)
   return c.json({

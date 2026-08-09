@@ -15,6 +15,9 @@ dist/
 node_modules/
 .wrangler
 
+# wrangler-generated types (npm run cf-typegen)
+worker-configuration.d.ts
+
 # env
 .env
 .env.production

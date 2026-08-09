@@ -3,6 +3,10 @@ export type Bindings = {
   OPENAI_API_KEY?: string
   OPENAI_BASE_URL?: string
   LLM_MODEL?: string
+  /** 'development' = chế độ mở (sandbox/demo); mọi giá trị khác = production nghiêm ngặt */
+  APP_ENV?: string
+  /** Danh sách origin được phép (phân tách bằng dấu phẩy), bổ sung cho check CSRF */
+  ALLOWED_ORIGINS?: string
 }
 
 export type SessionUser = {

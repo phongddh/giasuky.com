@@ -324,7 +324,10 @@ export function postProcessPersona(
   return { text, citations, blocked: false }
 }
 
-/** 7.9 Rate limits — token bucket lưu trong D1 */
+/** 7.9 Rate limits — token bucket lưu trong D1.
+ *  Cập nhật ATOMIC bằng 1 câu UPSERT (ON CONFLICT ... DO UPDATE) nên không bị
+ *  TOCTOU khi hai yêu cầu đến đồng thời cùng vượt qua cửa kiểm tra.
+ */
 export async function checkRateLimit(
   env: Bindings,
   userId: string,
@@ -333,23 +336,22 @@ export async function checkRateLimit(
   windowHours = 24
 ): Promise<{ ok: boolean; remaining: number }> {
   const key = `${userId}:${endpoint}`
-  const now = Date.now()
-  const row = await env.DB.prepare(`SELECT window_start, counter FROM rate_limits WHERE key = ?`)
+  const minutes = Math.max(1, Math.round(windowHours * 60))
+  await env.DB.prepare(
+    `INSERT INTO rate_limits (key, window_start, counter) VALUES (?1, datetime('now'), 1)
+     ON CONFLICT(key) DO UPDATE SET
+       counter = CASE WHEN rate_limits.window_start < datetime('now', ?2)
+                      THEN 1 ELSE rate_limits.counter + 1 END,
+       window_start = CASE WHEN rate_limits.window_start < datetime('now', ?2)
+                           THEN datetime('now') ELSE rate_limits.window_start END`
+  )
+    .bind(key, `-${minutes} minutes`)
+    .run()
+  const row = await env.DB.prepare(`SELECT counter FROM rate_limits WHERE key = ?`)
     .bind(key)
     .first<any>()
-  const windowMs = windowHours * 3600 * 1000
-  if (!row || now - new Date(row.window_start + 'Z').getTime() > windowMs) {
-    await env.DB.prepare(
-      `INSERT INTO rate_limits (key, window_start, counter) VALUES (?1, datetime('now'), 1)
-       ON CONFLICT(key) DO UPDATE SET window_start = datetime('now'), counter = 1`
-    )
-      .bind(key)
-      .run()
-    return { ok: true, remaining: limit - 1 }
-  }
-  if (row.counter >= limit) return { ok: false, remaining: 0 }
-  await env.DB.prepare(`UPDATE rate_limits SET counter = counter + 1 WHERE key = ?`).bind(key).run()
-  return { ok: true, remaining: limit - row.counter - 1 }
+  const count = row?.counter ?? 1
+  return { ok: count <= limit, remaining: Math.max(0, limit - count) }
 }
 
 /**

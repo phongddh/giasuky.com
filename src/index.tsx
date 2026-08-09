@@ -3,7 +3,6 @@
  * Gateway hợp nhất 10 microservice của spec 7.1 thành các route module chạy trên edge.
  */
 import { Hono } from 'hono'
-import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 import type { AppEnv } from './lib/types'
 import { sessionMiddleware } from './lib/auth'
@@ -19,8 +18,54 @@ import { problem } from './lib/util'
 const app = new Hono<AppEnv>()
 
 app.use('*', logger())
-app.use('/api/*', cors({ origin: '*', credentials: true }))
 app.use('*', sessionMiddleware)
+
+// ------------------------------------------------------------------
+// CORS + chống CSRF cho /api/*
+//  - CORS: chỉ echo Access-Control-Allow-Origin khi origin thuộc danh sách
+//    được phép (cùng host, *.pages.dev, hoặc ALLOWED_ORIGINS). Không dùng
+//    `origin:'*'` + `credentials:true` — combo đó vừa bất hợp lệ vừa vô dụng.
+//  - CSRF: mọi yêu cầu thay đổi trạng thái mang header Origin từ nguồn lạ
+//    đều bị chặn (lớp phòng thủ thứ hai sau cookie SameSite=Lax).
+// ------------------------------------------------------------------
+const MUTATING = new Set(['POST', 'PATCH', 'PUT', 'DELETE'])
+
+function isAllowedOrigin(c: any, origin: string): boolean {
+  try {
+    const host = new URL(origin).host
+    if (host === (c.req.header('host') || '')) return true
+    if (host.endsWith('.pages.dev')) return true
+    if (host === 'localhost:3000' || host === 'localhost:8787') return true
+    for (const extra of (c.env.ALLOWED_ORIGINS || '').split(',')) {
+      if (extra.trim() === host) return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+app.use('/api/*', async (c, next) => {
+  const origin = c.req.header('origin')
+  if (origin) {
+    if (!isAllowedOrigin(c, origin)) {
+      if (MUTATING.has(c.req.method) || c.req.method === 'OPTIONS') {
+        return c.json(problem(403, 'CSRF blocked', 'Yêu cầu từ nguồn (origin) không được phép.'), 403)
+      }
+      return next()
+    }
+    c.header('Access-Control-Allow-Origin', origin)
+    c.header('Vary', 'Origin')
+    c.header('Access-Control-Allow-Credentials', 'true')
+  }
+  if (c.req.method === 'OPTIONS') {
+    c.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS')
+    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    c.header('Access-Control-Max-Age', '86400')
+    return c.body(null, 204)
+  }
+  await next()
+})
 
 // ------------------------------- API ---------------------------------
 app.get('/api/health', (c) =>
@@ -29,6 +74,7 @@ app.get('/api/health', (c) =>
     service: 'giasuky',
     spec: 'GiaSuKy-Technical-Specification-v1.0',
     llmReady: llmAvailable(c.env),
+    appEnv: c.env.APP_ENV || 'production',
     time: new Date().toISOString()
   })
 )

@@ -6,26 +6,21 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { json, problem, uuid, yearOf, ageOf } from '../lib/util'
+import { json, paramOf, problem, uuid, yearOf, ageOf } from '../lib/util'
 import { nextAnniversary, solarToLunar, formatLunar } from '../lib/lunar'
+import {
+  guardClanView, guardClanWrite, resolveClanId, visibleClanIds
+} from '../lib/access'
 
 export const genealogyRoutes = new Hono<AppEnv>()
-
-/** Clan hiện tại của user (hoặc clan public đầu tiên cho khách xem demo) */
-async function resolveClanId(c: any): Promise<string | null> {
-  const q = c.req.query('clanId')
-  if (q) return q
-  if (c.var.user?.clan_id) return c.var.user.clan_id
-  const row = await c.env.DB.prepare(`SELECT id FROM clans ORDER BY created_at LIMIT 1`).first<any>()
-  return row?.id ?? null
-}
 
 genealogyRoutes.get('/clans', async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT c.*, (SELECT COUNT(*) FROM persons p WHERE p.clan_id = c.id) AS person_count
-       FROM clans ORDER BY created_at`
-  ).all()
-  return c.json({ clans: rows.results })
+       FROM clans c ORDER BY created_at`
+  ).all<any>()
+  const visible = await visibleClanIds(c)
+  return c.json({ clans: visible ? rows.results.filter((r) => visible.has(r.id)) : rows.results })
 })
 
 genealogyRoutes.post('/clans', requireAuth, async (c) => {
@@ -48,9 +43,11 @@ genealogyRoutes.post('/clans', requireAuth, async (c) => {
 })
 
 genealogyRoutes.get('/clans/:clanId', async (c) => {
-  const id = c.req.param('clanId')
+  const id = paramOf(c, 'clanId')
   const clan = await c.env.DB.prepare(`SELECT * FROM clans WHERE id = ?`).bind(id).first<any>()
   if (!clan) return c.json(problem(404, 'Not found', 'Không tìm thấy dòng họ.'), 404)
+  const denied = await guardClanView(c, id)
+  if (denied) return denied
   const stats = await c.env.DB.prepare(
     `SELECT
        (SELECT COUNT(*) FROM persons WHERE clan_id = ?1) AS persons,
@@ -70,9 +67,21 @@ genealogyRoutes.get('/clans/:clanId', async (c) => {
  * Trả về nodes + edges cho Living Tree (F3). Ứng với Cypher Q1.
  */
 genealogyRoutes.get('/clans/:clanId/tree', async (c) => {
-  const clanId = c.req.param('clanId')
+  const clanId = paramOf(c, 'clanId')
+  const denied = await guardClanView(c, clanId)
+  if (denied) return denied
   const depth = Math.min(parseInt(c.req.query('depth') || '8', 10) || 8, 12)
   const rootId = c.req.query('rootId')
+
+  if (rootId) {
+    // Chống IDOR: gốc cây phải thuộc đúng clan đang xem
+    const rootClan = await c.env.DB.prepare(`SELECT clan_id FROM persons WHERE id = ?`)
+      .bind(rootId)
+      .first<any>()
+    if (!rootClan || rootClan.clan_id !== clanId) {
+      return c.json(problem(403, 'Forbidden', 'Gốc cây không thuộc dòng họ này.'), 403)
+    }
+  }
 
   let persons: any[]
   if (rootId) {
@@ -192,7 +201,9 @@ genealogyRoutes.get('/clans/:clanId/tree', async (c) => {
 
 /** POST /v1/clans/:clanId/members — thêm Person vào cây */
 genealogyRoutes.post('/clans/:clanId/members', requireAuth, async (c) => {
-  const clanId = c.req.param('clanId')
+  const clanId = paramOf(c, 'clanId')
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
   const b = await c.req.json().catch(() => ({} as any))
   if (!b.full_name) return c.json(problem(400, 'Validation error', 'Cần họ tên.'), 400)
   const id = uuid()
@@ -258,9 +269,11 @@ genealogyRoutes.post('/clans/:clanId/members', requireAuth, async (c) => {
 })
 
 genealogyRoutes.get('/persons/:id', async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
   const p = await c.env.DB.prepare(`SELECT * FROM persons WHERE id = ?`).bind(id).first<any>()
   if (!p) return c.json(problem(404, 'Not found', 'Không tìm thấy người này.'), 404)
+  const denied = await guardClanView(c, p.clan_id)
+  if (denied) return denied
 
   const [parents, children, spouses, siblings, memCount, consents, advices] = await Promise.all([
     c.env.DB.prepare(
@@ -357,7 +370,13 @@ genealogyRoutes.get('/persons/:id', async (c) => {
 })
 
 genealogyRoutes.patch('/persons/:id', requireAuth, async (c) => {
-  const id = c.req.param('id')
+  const id = paramOf(c, 'id')
+  const clanId = await c.env.DB.prepare(`SELECT clan_id FROM persons WHERE id = ?`)
+    .bind(id)
+    .first<any>()
+  if (!clanId) return c.json(problem(404, 'Not found', 'Không tìm thấy người này.'), 404)
+  const denied = await guardClanWrite(c, clanId.clan_id)
+  if (denied) return denied
   const b = await c.req.json().catch(() => ({} as any))
   const allowed = [
     'full_name', 'gender', 'generation', 'birth_date', 'death_date', 'birth_place',
@@ -386,11 +405,23 @@ genealogyRoutes.patch('/persons/:id', requireAuth, async (c) => {
 
 /** POST /v1/persons/:id/relationships */
 genealogyRoutes.post('/persons/:id/relationships', requireAuth, async (c) => {
-  const from = c.req.param('id')
+  const from = paramOf(c, 'id')
   const b = await c.req.json().catch(() => ({} as any))
   if (!b.targetPersonId || !b.type) {
     return c.json(problem(400, 'Validation error', 'Cần targetPersonId và type.'), 400)
   }
+  // Cả hai người đều phải thuộc clan được phép (chống nối quan hệ xuyên clan)
+  const [fromClan, toClan] = await Promise.all([
+    c.env.DB.prepare(`SELECT clan_id FROM persons WHERE id = ?`).bind(from).first<any>(),
+    c.env.DB.prepare(`SELECT clan_id FROM persons WHERE id = ?`).bind(b.targetPersonId).first<any>()
+  ])
+  if (!fromClan) return c.json(problem(404, 'Not found', 'Không tìm thấy người gốc.'), 404)
+  if (!toClan) return c.json(problem(404, 'Not found', 'Không tìm thấy người đích.'), 404)
+  if (fromClan.clan_id !== toClan.clan_id) {
+    return c.json(problem(422, 'Cross-clan relationship', 'Không thể nối quan hệ giữa hai dòng họ khác nhau.'), 422)
+  }
+  const denied = await guardClanWrite(c, fromClan.clan_id)
+  if (denied) return denied
   const rid = uuid()
   await c.env.DB.prepare(
     `INSERT INTO relationships (id, from_person_id, to_person_id, type, biological, adopted, married_at, marriage_order)
@@ -409,6 +440,7 @@ genealogyRoutes.post('/persons/:id/relationships', requireAuth, async (c) => {
 /** Tìm kiếm người trong cây (search bar 8.4.1) */
 genealogyRoutes.get('/persons', async (c) => {
   const clanId = await resolveClanId(c)
+  if (!clanId) return c.json(problem(403, 'Forbidden', 'Không có dòng họ nào được phép truy cập.'), 403)
   const q = (c.req.query('q') || '').trim()
   if (!q) {
     const all = await c.env.DB.prepare(

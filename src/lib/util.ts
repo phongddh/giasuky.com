@@ -95,6 +95,13 @@ export function nowIso(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19)
 }
 
+/** Path param đã được router đảm bảo tồn tại khi route khớp */
+export function paramOf(c: any, name: string): string {
+  const v = c.req.param(name)
+  if (!v) throw new Error(`Thiếu path param: ${name}`)
+  return v
+}
+
 export function escapeHtml(s: string): string {
   return String(s ?? '')
     .replace(/&/g, '&amp;')
