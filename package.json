@@ -17,7 +17,11 @@
     "db:seed": "wrangler d1 execute webapp-production --local --file=./seed.sql",
     "db:reset": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate:local && npm run db:seed",
     "db:console:local": "wrangler d1 execute webapp-production --local",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "backup:d1": "node scripts/backup-d1.mjs",
+    "backup:d1:remote": "node scripts/backup-d1.mjs --remote",
+    "migrate:local": "wrangler d1 migrations apply webapp-production --local",
+    "migrate:prod": "wrangler d1 migrations apply webapp-production --remote"
   },
   "dependencies": {
     "hono": "^4.13.0"

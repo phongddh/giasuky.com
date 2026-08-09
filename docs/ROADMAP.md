@@ -166,8 +166,8 @@
 
 ### 4-24. D1 backup + quy trình migrate
 - **Nội dung**: script backup local → file `.sql`; quy trình: migration mới tạo file `migrations/000N_*.sql` + `wrangler d1 migrations apply`; lịch backup D1 remote (CLI/CRON ghi chú trong README).
-- **Done**: script backup chạy được; README có quy trình.
-- Trạng thái: `- [ ]`
+- **Done**: `scripts/backup-d1.mjs` (--local/--remote) → `backups/*.sql` (smoke: 152 KB); npm scripts backup:migrate:local/prod; README mục quy trình migrate.
+- Trạng thái: `- [x]`
 
 ### 4-25. CI/CD GitHub Actions
 - **Nội dung**: workflow: `npm ci` → `tsc --noEmit` → `npm test` → `vite build` → `wrangler pages deploy` (cần secrets: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID; chỉ chạy khi push main).

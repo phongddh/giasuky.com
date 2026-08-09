@@ -253,6 +253,17 @@ Các điểm chốt đã triển khai:
   3. `npx wrangler pages secret put OPENAI_API_KEY` và `npx wrangler pages secret put APP_ENV` (giá trị `production`; không đặt → mặc định đã là production nghiêm ngặt).
   4. `npm run deploy:prod`.
 
+### Quy trình migrate D1 (GĐ4-24)
+
+1. Tạo file migration mới: `migrations/000N_<mô tả>.sql` (chỉ `CREATE TABLE`/`ALTER`/`CREATE INDEX` idempotent; **không sửa file cũ**).
+2. Backup trước khi áp dụng (nhất là lên production):
+   - Local: `npm run backup:d1` → `backups/local-YYYY-MM-DD.sql`
+   - Remote: `npm run backup:d1:remote` → `backups/prod-YYYY-MM-DD.sql`
+3. Áp dụng: `npm run migrate:local` (sau khi đã test local) rồi `npm run migrate:prod`.
+4. Verify: `curl <url>/api/health` trả `version` mới (var `APP_VERSION` trong `wrangler.jsonc`).
+
+Lịch đề xuất: backup local trước mỗi đợt thay đổi schema; backup remote trước mỗi `migrate:prod` (hoặc định kỳ hằng tháng).
+
 ## 7. Chưa hoàn thiện / bước tiếp theo
 
 - [ ] **Truy hồi lệch chủ đề**: câu hỏi ngoài phạm vi vẫn có thể khớp một ký ức không liên quan (điểm 0.253 > ngưỡng 0.14) vì việc bỏ dấu làm "quán" ≈ "quần". Hướng sửa: tính điểm trên token **có dấu** khi câu hỏi vốn đã có dấu.
