@@ -13,6 +13,10 @@ export type Bindings = {
   BLOCKCHAIN_RPC_URL?: string
   BLOCKCHAIN_PRIVATE_KEY?: string
   BLOCKCHAIN_CHAIN?: string
+  /** GĐ5-27 Voice clone/TTS: cần đủ mới tổng hợp giọng thật; thiếu → mock */
+  TTS_API_URL?: string
+  TTS_API_KEY?: string
+  TTS_VOICE_ID?: string
 }
 
 export type SessionUser = {

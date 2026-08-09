@@ -186,10 +186,11 @@
 - **Test**: vitest 19/19 (lifecycle 202→idempotent→RUNNING→COMPLETED→list→guest 401); smoke HTTP + mock worker hoàn chỉnh.
 - Trạng thái: `- [x]` (phần in-repo xong; worker GPU ngoài là điều kiện sản xuất)
 
-### 5-27. Voice clone
-- **Hiện trạng**: stub (README:261).
-- **Cần**: dịch vụ TTS/voice cloning (ElevenLabs, Azure...) + consent scope `voice_clone` đã có; chỉ dùng sau khi consent high-risk ký mạnh.
-- Trạng thái: `- [ ]`
+### 5-27. Voice clone — TTS adapter + consent gate (provider ngoài cần key)
+- **Đã làm (in-repo)**: `src/lib/tts.ts` adapter (`synthesize`/`cloneVoice`/`ttsAvailable`); endpoints `POST /persona/:personId/voice/synthesize` + `voice/clone` — đều bắt buộc consent scope `voice_clone` (422 kèm hướng dẫn nếu thiếu, 4.7.5 high-risk) + clan guard + audit; sandbox không có key → trả mock minh bạch (`mock:true`, note); `/ai/hosts` trả `ttsReady`; UI nút "Giọng nói AI" trong drawer người (chỉ hiện khi activeScopes có voice_clone): đọc thử + clone từ audio mẫu.
+- **Contract provider ngoài**: set secrets `TTS_API_URL` + `TTS_API_KEY` (+`TTS_VOICE_ID`): `POST {TTS_API_URL}/synthesize {text,voiceId}` → `{audioUrl}`; `POST {TTS_API_URL}/clone {audioUrl,displayName}` → `{voiceId}` (ElevenLabs/Azure đều khớp dạng này). Không đổi code.
+- **Test**: vitest 23/23 (422 không consent → 200 mock synthesize/clone, 400 thiếu audioUrl); smoke: 422 → consent → mock true.
+- Trạng thái: `- [x]` (in-repo xong; tổng hợp giọng thật cần key provider)
 
 ### 5-28. Video call thật (SFU mediasoup)
 - **Hiện trạng**: polling thay (README:262).

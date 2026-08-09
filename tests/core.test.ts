@@ -294,8 +294,7 @@ describe('integration — pagination (4-22)', () => {
   })
 })
 
-describe('integration — media restoration job (5-26)', () => {
-  test('POST tạo job QUEUED (202) → worker chạy → poll COMPLETED; không ảnh → 422', async () => {
+describe('integration — media restoration job (5-26)', () => {  test('POST tạo job QUEUED (202) → worker chạy → poll COMPLETED; không ảnh → 422', async () => {
     const cookie = await loginDemo()
     await insertPersons([{ id: 'p-rest1', clan_id: 'clan-nguyen-dongngac', full_name: 'Ông Phục Dựng', gender: 'M', is_alive: 0, created_by: 'user-tung' }])
     await insertPersons([{ id: 'p-rest2', clan_id: 'clan-nguyen-dongngac', full_name: 'Bà Không Ảnh', gender: 'F', is_alive: 0, created_by: 'user-tung' }])
@@ -341,5 +340,52 @@ describe('integration — media restoration job (5-26)', () => {
     // 6. Guest không xem được job (401)
     const guest = await SELF.fetch(`${ORIGIN}/api/v1/media/restorations/${j1.jobId}`)
     expect(guest.status).toBe(401)
+  })
+})
+
+describe('integration — voice clone (5-27)', () => {
+  test('không consent voice_clone → 422; có consent → synthesize/clone trả mock', async () => {
+    const cookie = await loginDemo()
+    await insertPersons([{ id: 'p-vo1', clan_id: 'clan-nguyen-dongngac', full_name: 'Cụ Giọng', gender: 'M', is_alive: 0, created_by: 'user-tung' }])
+
+    // 1. Chưa có consent voice_clone → 422
+    const noConsent = await SELF.fetch(`${ORIGIN}/api/v1/persona/p-vo1/voice/synthesize`, {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'Xin chào' })
+    })
+    expect(noConsent.status).toBe(422)
+
+    // 2. Tạo consent voice_clone
+    const cons = await SELF.fetch(`${ORIGIN}/api/v1/consent`, {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subjectPersonId: 'p-vo1', scope: ['voice_clone'], signatureMethod: 'NOTARY' })
+    })
+    expect(cons.status).toBe(200)
+
+    // 3. Synthesize (chưa cấu hình TTS) → mock:true, không audioUrl
+    const syn = await SELF.fetch(`${ORIGIN}/api/v1/persona/p-vo1/voice/synthesize`, {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'Xin chào con cháu' })
+    })
+    expect(syn.status).toBe(200)
+    const sj = await syn.json()
+    expect(sj.mock).toBe(true)
+    expect(sj.audioUrl).toBeNull()
+    expect(sj.consentId).toBeTruthy()
+
+    // 4. Clone (chưa cấu hình) → mock:true; thiếu audioUrl → 400
+    const noAudio = await SELF.fetch(`${ORIGIN}/api/v1/persona/p-vo1/voice/clone`, {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    })
+    expect(noAudio.status).toBe(400)
+    const cl = await SELF.fetch(`${ORIGIN}/api/v1/persona/p-vo1/voice/clone`, {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audioUrl: 'https://cdn.giasuky.com/x/mau.mp3', displayName: 'Giọng cụ' })
+    })
+    expect(cl.status).toBe(200)
+    const cj = await cl.json()
+    expect(cj.mock).toBe(true)
+    expect(cj.status).toBe('PROCESSING')
   })
 })

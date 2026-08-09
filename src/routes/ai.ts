@@ -15,12 +15,67 @@ import {
 import {
   clanOfInterview, clanOfPerson, guardClanView, guardClanWrite, visibleClanIds
 } from '../lib/access'
+import { cloneVoice, synthesize, ttsAvailable } from '../lib/tts'
 
 export const aiRoutes = new Hono<AppEnv>()
 
 aiRoutes.get('/ai/hosts', (c) =>
-  c.json({ hosts: AI_HOSTS, topics: INTERVIEW_TOPICS, llmReady: llmAvailable(c.env) })
+  c.json({ hosts: AI_HOSTS, topics: INTERVIEW_TOPICS, llmReady: llmAvailable(c.env), ttsReady: ttsAvailable(c.env) })
 )
+
+// ============ GĐ5-27 — VOICE CLONE / TTS (consent scope voice_clone) ============
+
+/** Phát thử giọng của một người — bắt buộc consent high-risk `voice_clone` */
+aiRoutes.post('/persona/:personId/voice/synthesize', requireAuth, async (c) => {
+  const personId = paramOf(c, 'personId')
+  const clanId = await clanOfPerson(c, personId)
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
+  const consent = await assertConsent(c.env, personId, 'voice_clone')
+  if (!consent.ok) {
+    return c.json(
+      problem(
+        422,
+        'Consent required',
+        'Chưa có đồng thuận giọng nói (voice_clone). Giọng nói là dữ liệu high-risk — cần ConsentRecord có scope voice_clone trước khi tổng hợp.'
+      ),
+      422
+    )
+  }
+  const b = await c.req.json().catch(() => ({} as any))
+  const text = String(b.text || '').trim().slice(0, 500)
+  if (!text) return c.json(problem(400, 'Validation error', 'Cần nội dung lời nói.'), 400)
+  const result = await synthesize(c.env, text, b.voiceId)
+  await audit(c, 'voice.synthesize', 'person', personId, { consentId: consent.consentId, mock: result.mock })
+  return c.json({ ...result, consentId: consent.consentId })
+})
+
+/** Clone giọng từ mẫu âm thanh — bắt buộc consent voice_clone (4.7.5 high-risk) */
+aiRoutes.post('/persona/:personId/voice/clone', requireAuth, async (c) => {
+  const personId = paramOf(c, 'personId')
+  const clanId = await clanOfPerson(c, personId)
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
+  const consent = await assertConsent(c.env, personId, 'voice_clone')
+  if (!consent.ok) {
+    return c.json(
+      problem(
+        422,
+        'Consent required',
+        'Chưa có đồng thuận giọng nói (voice_clone) — không thể clone giọng.'
+      ),
+      422
+    )
+  }
+  const b = await c.req.json().catch(() => ({} as any))
+  if (!b.audioUrl) return c.json(problem(400, 'Validation error', 'Cần audioUrl mẫu giọng (≥ 30s lời nói rõ).'), 400)
+  if (b.displayName && String(b.displayName).length > 80) {
+    return c.json(problem(400, 'Validation error', 'Tên giọng quá dài.'), 400)
+  }
+  const result = await cloneVoice(c.env, String(b.audioUrl), String(b.displayName || 'Giọng của dòng họ'))
+  await audit(c, 'voice.clone', 'person', personId, { consentId: consent.consentId, mock: result.mock })
+  return c.json({ ...result, consentId: consent.consentId })
+})
 
 // ==================== F2 — AI INTERVIEWER ============================
 

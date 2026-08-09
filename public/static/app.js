@@ -659,6 +659,7 @@ async function openPerson(id) {
       ${p.is_alive ? `<button class="btn sm ghost" id="pd-interview"><i class="fa-solid fa-microphone-lines"></i> Phỏng vấn AI</button>` : ''}
       <button class="btn sm ghost" id="pd-consent"><i class="fa-solid fa-file-signature"></i> Đồng thuận</button>
       ${!p.is_alive && p.photo_url && S.user ? `<button class="btn sm quiet" id="pd-restore"><i class="fa-solid fa-wand-magic-sparkles"></i> Phục dựng ảnh</button>` : ''}
+      ${(d.activeScopes || []).includes('voice_clone') ? `<button class="btn sm quiet" id="pd-voice"><i class="fa-solid fa-microphone"></i> Giọng nói AI</button>` : ''}
     </div>
 
     <div id="pd-restore-out" class="mt-3"></div>
@@ -693,6 +694,50 @@ async function openPerson(id) {
   if ($('#pd-interview')) $('#pd-interview').onclick = () => { closeOverlay(); newInterviewModal(id, p.full_name) }
   $('#pd-consent').onclick = () => consentModal(id, p.full_name)
   if ($('#pd-restore')) $('#pd-restore').onclick = () => restorePhotoFlow(id, p.full_name, $('#pd-restore-out'))
+  if ($('#pd-voice')) $('#pd-voice').onclick = () => voiceModal(id, p.full_name)
+}
+
+/** GĐ5-27 — Giọng nói AI: phát thử (TTS) + clone giọng từ mẫu âm thanh */
+async function voiceModal(personId, name) {
+  modal(`
+    <div class="row between"><h3>Giọng nói AI — ${esc(name)}</h3>
+      <button class="x-btn" data-close><i class="fa-solid fa-xmark"></i></button></div>
+    <p class="muted" style="font-size:13px">Chỉ hoạt động khi người này đã ký đồng thuận scope <b>voice_clone</b> (dữ liệu giọng nói là high-risk).</p>
+    <div class="field mt-3"><label>Lời muốn đọc thử</label>
+      <textarea id="vo-text" rows="3" placeholder="Ví dụ: Chào con cháu, ta là…"></textarea></div>
+    <div class="row end mt-3"><button class="btn gold" id="vo-play"><i class="fa-solid fa-play"></i> Đọc thử</button></div>
+    <div id="vo-out" class="mt-3"></div>
+    <div class="divider my-3"></div>
+    <div class="fkey">CLONE GIỌNG TỪ MẪU</div>
+    <div class="field mt-2"><label>Audio mẫu (URL, ≥ 30 giây lời nói rõ)</label>
+      <input id="vo-audio" placeholder="https://…/mau-giong.mp3"></div>
+    <div class="field"><label>Tên giọng</label><input id="vo-name" placeholder="Giọng của dòng họ"></div>
+    <div class="row end mt-3"><button class="btn" id="vo-clone"><i class="fa-solid fa-clone"></i> Clone giọng</button></div>`)
+  $('#vo-play').onclick = async () => {
+    const out = $('#vo-out')
+    out.innerHTML = loading('Đang tổng hợp…')
+    try {
+      const r = await api(`/persona/${personId}/voice/synthesize`, {
+        method: 'POST', body: { text: $('#vo-text').value || 'Gia Sử Ký đang thử giọng của bạn.' }
+      })
+      out.innerHTML = r.audioUrl
+        ? `<audio controls src="${esc(r.audioUrl)}" style="width:100%"></audio>
+           <div class="muted mt-1" style="font-size:12px">${esc(r.note || '')}</div>`
+        : `<div class="alert warn" style="font-size:13px">${esc(r.note || 'Chưa cấu hình TTS.')}</div>`
+    } catch (e) { out.innerHTML = errBox(e) }
+  }
+  $('#vo-clone').onclick = async () => {
+    const out = $('#vo-out')
+    out.innerHTML = loading('Đang gửi yêu cầu clone…')
+    try {
+      const r = await api(`/persona/${personId}/voice/clone`, {
+        method: 'POST', body: { audioUrl: $('#vo-audio').value.trim(), displayName: $('#vo-name').value.trim() }
+      })
+      out.innerHTML = r.voiceId
+        ? `<div class="alert ok" style="font-size:13px">Voice ID: <code>${esc(r.voiceId)}</code> — ${esc(r.note || 'đang xử lý.')}</div>`
+        : `<div class="alert warn" style="font-size:13px">${esc(r.note || 'Chưa cấu hình voice clone.')}</div>`
+    } catch (e) { out.innerHTML = errBox(e) }
+  }
 }
 
 /** GĐ5-26 — Phục dựng ảnh: tạo job → poll tiến trình → hiển thị kết quả */
