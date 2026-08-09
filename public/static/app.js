@@ -658,7 +658,10 @@ async function openPerson(id) {
         <i class="fa-solid fa-comments"></i> ${canChat ? 'Trò chuyện' : 'Chưa có đồng thuận'}</button>` : ''}
       ${p.is_alive ? `<button class="btn sm ghost" id="pd-interview"><i class="fa-solid fa-microphone-lines"></i> Phỏng vấn AI</button>` : ''}
       <button class="btn sm ghost" id="pd-consent"><i class="fa-solid fa-file-signature"></i> Đồng thuận</button>
+      ${!p.is_alive && p.photo_url && S.user ? `<button class="btn sm quiet" id="pd-restore"><i class="fa-solid fa-wand-magic-sparkles"></i> Phục dựng ảnh</button>` : ''}
     </div>
+
+    <div id="pd-restore-out" class="mt-3"></div>
 
     ${(d.advices || []).length ? `<div class="card paper mt-4" style="padding:var(--sp-4)">
       <div class="fkey">LỜI DẶN CỦA NGƯỜI NÀY</div>
@@ -689,6 +692,44 @@ async function openPerson(id) {
   if ($('#pd-chat')) $('#pd-chat').onclick = () => personaChat(id, p.full_name)
   if ($('#pd-interview')) $('#pd-interview').onclick = () => { closeOverlay(); newInterviewModal(id, p.full_name) }
   $('#pd-consent').onclick = () => consentModal(id, p.full_name)
+  if ($('#pd-restore')) $('#pd-restore').onclick = () => restorePhotoFlow(id, p.full_name, $('#pd-restore-out'))
+}
+
+/** GĐ5-26 — Phục dựng ảnh: tạo job → poll tiến trình → hiển thị kết quả */
+async function restorePhotoFlow(personId, name, out) {
+  out.innerHTML = loading('Đang xếp hàng cho GPU worker…')
+  let job
+  try {
+    const r = await api(`/persons/${personId}/restore-photo`, { method: 'POST' })
+    job = r.jobId ? r : (r.status ? r : null)
+    if (!job) throw new Error('Không nhận được job từ máy chủ.')
+  } catch (e) {
+    out.innerHTML = `<div class="alert danger" style="font-size:13px">${esc(e.message)}</div>`
+    return
+  }
+  const poll = async () => {
+    let j
+    try { j = await api(`/media/restorations/${job.jobId}`) } catch (e) { out.innerHTML = errBox(e); return }
+    const pct = Math.min(j.progress || 0, 100)
+    out.innerHTML = `
+      <div class="fkey">PHỤC DỰNG ẢNH — ${esc(name.toUpperCase())}</div>
+      <div class="progress mt-2"><div class="progress-fill" style="width:${pct}%"></div></div>
+      <div class="muted mt-1" style="font-size:12px">${j.status === 'COMPLETED' ? 'Hoàn tất.' : j.status === 'FAILED' ? `Lỗi: ${esc(j.error || 'không rõ')}` : `${pct}% — ${j.status === 'RUNNING' ? 'GPU đang xử lý (4 bước MediaPipe → GFPGAN → DeOldify → Real-ESRGAN)' : 'chờ worker nhận job…'}`}</div>
+      ${j.status === 'COMPLETED' && (j.outputs || []).length ? `
+        <div class="row mt-2" style="gap:8px;align-items:flex-start">
+          ${j.outputs.map((o) => `<div style="flex:1;min-width:0">
+            <img src="${esc(o.url)}" alt="${esc(o.kind)}" style="width:100%;border-radius:8px;border:1px solid var(--line)">
+            <div class="muted center mt-1" style="font-size:11px">${esc(o.kind)}</div></div>`).join('')}
+        </div>
+        <div class="muted mt-2" style="font-size:12px">Guardrail 4.1.6: ảnh quá mờ chỉ cảnh báo, <b>không tô màu</b> để tránh bịa nét mặt.</div>`
+      : ''}
+      ${j.status === 'FAILED' ? `<button class="btn sm mt-2" id="pd-restore-retry">Thử lại</button>` : ''}
+      ${j.status !== 'COMPLETED' && j.status !== 'FAILED' ? `<div class="muted mt-2" style="font-size:11px">Tự làm mới mỗi 2 giây…</div>` : ''}`
+    if ($('#pd-restore-retry')) $('#pd-restore-retry').onclick = () => restorePhotoFlow(personId, name, out)
+    if (j.status === 'COMPLETED' || j.status === 'FAILED') return
+    setTimeout(poll, 2000)
+  }
+  poll()
 }
 
 /* ==================== F1 — DIGITAL ALTAR =========================== */

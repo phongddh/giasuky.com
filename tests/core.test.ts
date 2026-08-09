@@ -255,3 +255,53 @@ describe('integration — pagination (4-22)', () => {
     expect(mem.total).toBeGreaterThanOrEqual(0)
   })
 })
+
+describe('integration — media restoration job (5-26)', () => {
+  test('POST tạo job QUEUED (202) → worker chạy → poll COMPLETED; không ảnh → 422', async () => {
+    const cookie = await loginDemo()
+    await insertPersons([{ id: 'p-rest1', clan_id: 'clan-nguyen-dongngac', full_name: 'Ông Phục Dựng', gender: 'M', is_alive: 0, created_by: 'user-tung' }])
+    await insertPersons([{ id: 'p-rest2', clan_id: 'clan-nguyen-dongngac', full_name: 'Bà Không Ảnh', gender: 'F', is_alive: 0, created_by: 'user-tung' }])
+    await env.DB.prepare(`UPDATE persons SET photo_url = 'https://cdn.giasuky.com/x/ong.jpg' WHERE id = 'p-rest1'`).run()
+
+    // 1. Chưa có ảnh → 422
+    const noPhoto = await SELF.fetch(`${ORIGIN}/api/v1/persons/p-rest2/restore-photo`, { method: 'POST', headers: { cookie } })
+    expect(noPhoto.status).toBe(422)
+
+    // 2. Tạo job → 202 + jobId + pollUrl
+    const created = await SELF.fetch(`${ORIGIN}/api/v1/persons/p-rest1/restore-photo`, { method: 'POST', headers: { cookie } })
+    expect(created.status).toBe(202)
+    const j1 = await created.json()
+    expect(j1.jobId).toBeTruthy()
+    expect(j1.pollUrl).toContain(j1.jobId)
+
+    // 3. Idempotent: tạo lần 2 cùng người → cùng jobId
+    const again = await SELF.fetch(`${ORIGIN}/api/v1/persons/p-rest1/restore-photo`, { method: 'POST', headers: { cookie } })
+    const j2 = await again.json()
+    expect(j2.jobId).toBe(j1.jobId)
+
+    // 4. Simulate worker ngoài: QUEUED → RUNNING → COMPLETED
+    await env.DB.prepare(
+      `UPDATE media_restorations SET status='RUNNING', progress=45, updated_at=datetime('now') WHERE id = ?`
+    ).bind(j1.jobId).run()
+    const running = await (await SELF.fetch(`${ORIGIN}/api/v1/media/restorations/${j1.jobId}`, { headers: { cookie } })).json()
+    expect(running.status).toBe('RUNNING')
+    expect(running.progress).toBe(45)
+    await env.DB.prepare(
+      `UPDATE media_restorations SET status='COMPLETED', progress=100,
+              outputs='[{"kind":"restored_color","url":"https://cdn.giasuky.com/x/restored.jpg"}]'
+       WHERE id = ?`
+    ).bind(j1.jobId).run()
+    const done = await (await SELF.fetch(`${ORIGIN}/api/v1/media/restorations/${j1.jobId}`, { headers: { cookie } })).json()
+    expect(done.status).toBe('COMPLETED')
+    expect(done.outputs.length).toBe(1)
+
+    // 5. List theo personId
+    const list = await (await SELF.fetch(`${ORIGIN}/api/v1/media/restorations?personId=p-rest1`, { headers: { cookie } })).json()
+    expect(list.jobs.length).toBe(1)
+    expect(list.jobs[0].status).toBe('COMPLETED')
+
+    // 6. Guest không xem được job (401)
+    const guest = await SELF.fetch(`${ORIGIN}/api/v1/media/restorations/${j1.jobId}`)
+    expect(guest.status).toBe(401)
+  })
+})

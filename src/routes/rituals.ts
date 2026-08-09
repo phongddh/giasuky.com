@@ -7,10 +7,10 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { RELIGION_THEMES } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { enumProblem, json, paramOf, problem, uuid } from '../lib/util'
+import { enumProblem, json, pageParams, paginated, paramOf, problem, uuid } from '../lib/util'
 import { formatLunar, majorLunarHolidays, nextAnniversary, solarToLunar, lunarToSolar } from '../lib/lunar'
 import {
-  clanOfAltar, clanOfRitual, guardClanView, guardClanWrite, isOpenAccess, resolveClanId, visibleClanIds
+  clanOfAltar, clanOfPerson, clanOfRitual, guardClanView, guardClanWrite, isOpenAccess, resolveClanId, visibleClanIds
 } from '../lib/access'
 
 export const ritualRoutes = new Hono<AppEnv>()
@@ -485,26 +485,103 @@ ritualRoutes.get('/lunar/convert', (c) => {
 
 /**
  * 4.1.4 Photo restoration pipeline — spec dùng GFPGAN/CodeFormer/DeOldify/Real-ESRGAN
- * trên GPU worker. Cloudflare Workers không chạy được; endpoint trả kế hoạch job
- * và cảnh báo khi ảnh quá mờ (4.1.6: không tự tô màu để tránh bịa nét mặt).
+ * trên GPU worker. Cloudflare Workers không chạy được pipeline này; repo quản lý
+ * JOB (bảng media_restorations) và worker ngoài đọc QUEUED → chạy → cập nhật
+ * RUNNING → COMPLETED/FAILED. Guardrail 4.1.6 giữ nguyên: ảnh quá mờ chỉ cảnh báo,
+ * không tự tô màu để tránh bịa nét mặt.
+ *
+ * Contract (GĐ5-26):
+ *   POST /persons/:personId/restore-photo        → 202 { jobId, status, progress, pollUrl }
+ *   GET  /media/restorations/:jobId              → trạng thái job (poll)
+ *   GET  /media/restorations?personId=&limit=    → lịch sử job (phân trang)
+ * Worker ngoài: đọc media_restorations WHERE status='QUEUED', cập nhật
+ * RUNNING (progress 5..95) → COMPLETED (progress 100, outputs URL) | FAILED (error).
+ * Khi có bảng media riêng (binary upload), thêm endpoint /media/:mediaId tương đương.
  */
-ritualRoutes.post('/media/:mediaId/restore-photo', requireAuth, async (c) => {
-  const mediaId = paramOf(c, 'mediaId')
-  const b = await c.req.json().catch(() => ({} as any))
-  await audit(c, 'photo.restore.request', 'media', mediaId, b)
+const RESTORE_PIPELINE = [
+  { step: 1, name: 'face detection & alignment', model: 'MediaPipe' },
+  { step: 2, name: 'face restoration', model: 'GFPGAN / CodeFormer' },
+  { step: 3, name: 'colorization', model: 'DeOldify' },
+  { step: 4, name: 'upscale 4x', model: 'Real-ESRGAN' }
+]
+
+ritualRoutes.post('/persons/:personId/restore-photo', requireAuth, async (c) => {
+  const personId = paramOf(c, 'personId')
+  const clanId = await clanOfPerson(c, personId)
+  if (!clanId) return c.json(problem(404, 'Not found', 'Người này không tồn tại.'), 404)
+  const denied = await guardClanWrite(c, clanId)
+  if (denied) return denied
+  const person = await c.env.DB.prepare(
+    `SELECT id, full_name, photo_url FROM persons WHERE id = ?`
+  ).bind(personId).first<any>()
+  if (!person?.photo_url) {
+    return c.json(problem(422, 'Validation error', 'Người này chưa có ảnh (photo_url) để phục dựng.'), 422)
+  }
+  // Idempotent: nếu đã có job QUEUED/RUNNING cho người này thì trả job đó (chống spam worker).
+  const active = await c.env.DB.prepare(
+    `SELECT id FROM media_restorations WHERE person_id = ? AND status IN ('QUEUED','RUNNING') LIMIT 1`
+  ).bind(personId).first<any>()
+  if (active) {
+    return c.json(
+      { jobId: active.id, status: 'QUEUED', progress: 0, note: 'Job đã tồn tại cho người này.', pollUrl: `/api/v1/media/restorations/${active.id}` },
+      202
+    )
+  }
+  const jobId = uuid()
+  await c.env.DB.prepare(
+    `INSERT INTO media_restorations (id, person_id, clan_id, status, progress, pipeline, outputs, created_by)
+     VALUES (?,?,?,?,?,?,?,?)`
+  ).bind(
+    jobId, personId, clanId, 'QUEUED', 0,
+    JSON.stringify(RESTORE_PIPELINE), '[]', c.var.user!.id
+  ).run()
+  await audit(c, 'photo.restore.request', 'person', personId, { jobId, pipeline: RESTORE_PIPELINE.map((p) => p.name) })
+  return c.json(
+    { jobId, status: 'QUEUED', progress: 0, pollUrl: `/api/v1/media/restorations/${jobId}`, pipeline: RESTORE_PIPELINE },
+    202
+  )
+})
+
+ritualRoutes.get('/media/restorations/:jobId', requireAuth, async (c) => {
+  const jobId = paramOf(c, 'jobId')
+  const job = await c.env.DB.prepare(
+    `SELECT r.*, p.full_name AS person_name, p.photo_url AS source_url
+       FROM media_restorations r LEFT JOIN persons p ON p.id = r.person_id
+      WHERE r.id = ?`
+  ).bind(jobId).first<any>()
+  if (!job) return c.json(problem(404, 'Not found', 'Không có job phục dựng này.'), 404)
+  const denied = await guardClanView(c, job.clan_id)
+  if (denied) return denied
   return c.json({
-    jobId: uuid(),
-    status: 'QUEUED_EXTERNAL',
-    pipeline: [
-      { step: 1, name: 'face detection & alignment', model: 'MediaPipe' },
-      { step: 2, name: 'face restoration', model: 'GFPGAN / CodeFormer' },
-      { step: 3, name: 'colorization', model: 'DeOldify' },
-      { step: 4, name: 'upscale 4x', model: 'Real-ESRGAN' }
-    ],
-    outputs: ['original', 'restored_bw', 'restored_color'],
-    guardrail:
-      'Nếu ảnh quá mờ, hệ thống chỉ cảnh báo và KHÔNG tự tô màu để tránh bịa nét mặt tổ tiên (4.1.6).',
-    note:
-      'Pipeline này cần GPU worker ngoài Cloudflare Workers (spec 5.2 Layer 3). Endpoint hiện ghi nhận yêu cầu và trả kế hoạch job.'
+    jobId: job.id, personId: job.person_id, personName: job.person_name,
+    sourceUrl: job.source_url, status: job.status, progress: job.progress,
+    pipeline: JSON.parse(job.pipeline || '[]'), outputs: JSON.parse(job.outputs || '[]'),
+    error: job.error, createdAt: job.created_at, updatedAt: job.updated_at
   })
+})
+
+ritualRoutes.get('/media/restorations', requireAuth, async (c) => {
+  const page = pageParams(c, 20)
+  const personId = c.req.query('personId')
+  const clanIds = await visibleClanIds(c)
+  const clanList = clanIds ? [...clanIds] : null
+  const where = clanList ? `WHERE clan_id IN (${clanList.map((_, i) => `?${i + 1}`).join(',')})` : ''
+  const args: string[] = clanList ? [...clanList] : []
+  const personWhere = personId ? `${where ? 'AND' : 'WHERE'} person_id = ?${args.length + 1}` : ''
+  if (personId) args.push(personId)
+  const n = args.length
+  const totalRow = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM media_restorations ${where} ${personWhere}`
+  ).bind(...args).first<any>()
+  const rows = await c.env.DB.prepare(
+    `SELECT r.*, p.full_name AS person_name
+       FROM media_restorations r LEFT JOIN persons p ON p.id = r.person_id
+       ${where} ${personWhere}
+      ORDER BY r.created_at DESC LIMIT ?${n + 1} OFFSET ?${n + 2}`
+  ).bind(...args, page.limit, page.offset).all<any>()
+  const jobs = (rows.results || []).map((r) => ({
+    jobId: r.id, personId: r.person_id, personName: r.person_name,
+    status: r.status, progress: r.progress, error: r.error, createdAt: r.created_at, updatedAt: r.updated_at
+  }))
+  return c.json({ jobs, ...paginated(jobs, totalRow?.n || 0, page) })
 })

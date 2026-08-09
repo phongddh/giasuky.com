@@ -848,3 +848,7 @@ body.elder-mode .flame, body.elder-mode .smoke, body.elder-mode .stick::after {
 .f1 { flex: 1; }
 .hide { display: none !important; }
 .clamp3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* GĐ5-26 — progress bar phục dựng ảnh */
+.progress { height: 8px; border-radius: 99px; background: rgba(120, 90, 60, 0.25); overflow: hidden; }
+.progress-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #b98a3a, #e0c060); transition: width .5s ease; }

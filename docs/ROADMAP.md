@@ -180,11 +180,11 @@
 
 > Các mục này cần hạ tầng riêng (GPU, dịch vụ bên ngoài). Trong repo này: giữ contract API + code path + UI; phần worker/dịch vụ ngoài ghi rõ yêu cầu.
 
-### 5-26. Phục dựng ảnh AI — `src/routes/rituals.ts:483-489` (stub QUEUED_EXTERNAL)
-- **Hiện trạng**: POST /media/:mediaId/restore-photo trả `status: QUEUED_EXTERNAL` — không có worker xử lý.
-- **Cần**: worker GPU riêng (Workers AI hoặc API bên ngoài) nhận job từ hàng đợi D1/Durable Object, trả ảnh phục dựng; repo này: bảng `media_restorations` (job_id, status, error), poll endpoint, UI hiển thị tiến trình.
-- **Contract**: định nghĩa trong ROADMAP khi triển khai.
-- Trạng thái: `- [ ]`
+### 5-26. Phục dựng ảnh AI — job pipeline + contract worker ngoài
+- **Đã làm (in-repo)**: migration `0002_media_restorations.sql`; `POST /persons/:personId/restore-photo` (auth + clan write, idempotent, 422 nếu chưa có ảnh) → 202 `{jobId,status,progress,pollUrl}`; `GET /media/restorations/:jobId` (poll, clan view); `GET /media/restorations?personId=` (phân trang); mock worker `scripts/mock-restore-worker.mjs` (QUEUED→RUNNING→COMPLETED, simulate GPU 5s); UI nút "Phục dựng ảnh" trong drawer người (progress bar + outputs + guardrail 4.1.6, retry khi FAILED).
+- **Contract worker ngoài (cần triển khai ở nơi khác)**: đọc `media_restorations WHERE status='QUEUED'` → chạy pipeline GPU (MediaPipe → GFPGAN/CodeFormer → DeOldify → Real-ESRGAN) → `UPDATE ... RUNNING(progress 5..95)` → `COMPLETED` (outputs JSON: original/restored_bw/restored_color URL) hoặc `FAILED` (error). Ảnh quá mờ: chỉ cảnh báo, không tô màu (4.1.6).
+- **Test**: vitest 19/19 (lifecycle 202→idempotent→RUNNING→COMPLETED→list→guest 401); smoke HTTP + mock worker hoàn chỉnh.
+- Trạng thái: `- [x]` (phần in-repo xong; worker GPU ngoài là điều kiện sản xuất)
 
 ### 5-27. Voice clone
 - **Hiện trạng**: stub (README:261).
