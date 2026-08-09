@@ -268,11 +268,11 @@ Lịch đề xuất: backup local trước mỗi đợt thay đổi schema; back
 
 - [ ] **Truy hồi lệch chủ đề**: câu hỏi ngoài phạm vi vẫn có thể khớp một ký ức không liên quan (điểm 0.253 > ngưỡng 0.14) vì việc bỏ dấu làm "quán" ≈ "quần". Hướng sửa: tính điểm trên token **có dấu** khi câu hỏi vốn đã có dấu.
 - [ ] **LLM key hiện hết hạn** (401) — cần nạp lại key để dùng đầy đủ AI (fallback vẫn an toàn).
-- [ ] Deploy production lên Cloudflare Pages + bind D1 thật.
-- [ ] Clone giọng nói / phục dựng ảnh bằng AI thật (hiện là stub, đúng theo giới hạn edge runtime).
+- [ ] Deploy production lên Cloudflare Pages + bind D1 thật — script `./scripts/deploy-production.sh` đã sẵn sàng (cần `wrangler login`).
+- [ ] Clone giọng nói / phục dựng ảnh bằng AI thật — job pipeline, adapter TTS/notary, UI đã xong (GĐ5 26/27/30); cần key provider + GPU worker ngoài.
 - [ ] Video call nghi lễ (mediasoup SFU) — contract signalling đã định nghĩa trong ROADMAP 5-28; cần server riêng (không chạy trên Workers), client giữ poll-sync làm fallback.
-- [ ] Tích hợp DNA lab & đối sánh quan hệ sinh học.
-- [ ] Test tự động (unit / e2e) — hiện chỉ có smoke test bằng `curl`.
+- [ ] Tích hợp DNA lab & đối sánh quan hệ sinh học — module nhập liệu + UI quan hệ ước tính đã xong (GĐ5-29); cần đối tác lab.
+- [x] Test tự động — vitest + pool-workers: `npm test` 24/24 (unit + integration trên D1 thật, CI trong .github/workflows).
 - [ ] Deploy production: set `APP_ENV=production` + kiểm tra quyền truy cập theo thành viên dòng họ (đã triển khai code, cần verify trên môi trường thật).
 
 ---
