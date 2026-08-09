@@ -160,9 +160,9 @@
 - Trạng thái: `- [x]`
 
 ### 4-23. Observability
-- **Nội dung**: structured log chuẩn JSON cho onError + các event quan trọng (đã có audit_logs); thêm requestId header; đưa version/deploy vào /api/health (đã có appEnv).
-- **Done**: log đủ để debug production; health trả version.
-- Trạng thái: `- [ ]`
+- **Nội dung**: structured log chuẩn JSON cho onError + access log; requestId header (client giữ nguyên); version vào /api/health.
+- **Done**: `x-request-id` trả về mọi request; error log JSON kèm requestId/path/stack; health trả `version` (var APP_VERSION).
+- Trạng thái: `- [x]`
 
 ### 4-24. D1 backup + quy trình migrate
 - **Nội dung**: script backup local → file `.sql`; quy trình: migration mới tạo file `migrations/000N_*.sql` + `wrangler d1 migrations apply`; lịch backup D1 remote (CLI/CRON ghi chú trong README).

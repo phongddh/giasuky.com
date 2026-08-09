@@ -7,6 +7,8 @@ export type Bindings = {
   APP_ENV?: string
   /** Danh sách origin được phép (phân tách bằng dấu phẩy), bổ sung cho check CSRF */
   ALLOWED_ORIGINS?: string
+  /** Phiên bản build, trả trong /api/health */
+  APP_VERSION?: string
 }
 
 export type SessionUser = {
@@ -22,6 +24,8 @@ export type SessionUser = {
 
 export type Variables = {
   user: SessionUser | null
+  /** Request id truy vết log/audit (4-23 observability) */
+  requestId: string
 }
 
 export type AppEnv = { Bindings: Bindings; Variables: Variables }

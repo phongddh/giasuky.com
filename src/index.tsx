@@ -17,7 +17,26 @@ import { problem } from './lib/util'
 
 const app = new Hono<AppEnv>()
 
-app.use('*', logger())
+// 4-23 Observability: mỗi request mang requestId (client giữ nguyên nếu gửi kèm),
+// response trả x-request-id để truy vết lỗi với log.
+app.use('*', async (c, next) => {
+  const rid = c.req.header('x-request-id') || crypto.randomUUID()
+  c.set('requestId', rid)
+  c.header('x-request-id', rid)
+  await next()
+})
+
+app.use('*', logger((message, ...rest) => {
+  const c = (rest[0] as { req?: { path: string }; get?: (k: string) => string }) as any
+  console.log(
+    JSON.stringify({
+      type: 'access',
+      message,
+      path: c?.req?.path,
+      requestId: c?.get?.('requestId') || undefined
+    })
+  )
+}))
 app.use('*', sessionMiddleware)
 
 // ------------------------------------------------------------------
@@ -73,6 +92,7 @@ app.get('/api/health', (c) =>
     ok: true,
     service: 'giasuky',
     spec: 'GiaSuKy-Technical-Specification-v1.0',
+    version: c.env.APP_VERSION || 'dev',
     llmReady: llmAvailable(c.env),
     appEnv: c.env.APP_ENV || 'production',
     time: new Date().toISOString()
@@ -87,7 +107,15 @@ app.route('/api/v1', aiRoutes)
 app.route('/api/v1', ritualRoutes)
 
 app.onError((err, c) => {
-  console.error('[error]', err)
+  const payload = {
+    type: 'error',
+    requestId: c.get('requestId') || undefined,
+    method: c.req.method,
+    path: c.req.path,
+    err: err.message,
+    stack: err.stack?.split('\n').slice(0, 6).join(' | ')
+  }
+  console.error(JSON.stringify(payload))
   if (c.req.path.startsWith('/api/')) {
     return c.json(problem(500, 'Internal error', err.message || 'Lỗi hệ thống.'), 500)
   }

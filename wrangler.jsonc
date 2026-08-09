@@ -4,6 +4,9 @@
   "compatibility_date": "2026-08-04",
   "pages_build_output_dir": "./dist",
   "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "APP_VERSION": "1.0.0"
+  },
   // Layer 1 — Data Foundation (spec 5.2). Neo4j + PostgreSQL của spec được
   // hợp nhất vào D1 (SQLite) cho MVP edge: quan hệ gia phả dùng recursive CTE.
   "d1_databases": [
