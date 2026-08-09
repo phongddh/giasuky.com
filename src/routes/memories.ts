@@ -6,7 +6,7 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { enumProblem, json, paramOf, problem, removeTone, uuid } from '../lib/util'
+import { enumProblem, json, pageParams, paginated, paramOf, problem, removeTone, uuid } from '../lib/util'
 import { embed, llmChat, llmAvailable } from '../lib/ai'
 import { ADVICE_CATEGORIES } from '../lib/types'
 import {
@@ -117,8 +117,17 @@ memoryRoutes.get('/persons/:id/memories', async (c) => {
   const denied = await guardClanView(c, await clanOfPerson(c, pid))
   if (denied) return denied
   const type = c.req.query('type')
-  const lim = parseInt(c.req.query('limit') || '20', 10)
-  const limit = Number.isFinite(lim) && lim > 0 ? Math.min(lim, 100) : 20
+  const page = pageParams(c)
+  const totalRow = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS n
+       FROM memories m
+      WHERE (m.subject_person_id = ?1 OR m.told_by_person_id = ?1
+             OR EXISTS (SELECT 1 FROM memory_persons mp WHERE mp.memory_id = m.id AND mp.person_id = ?1))
+        AND m.status = 'APPROVED'
+        AND (?2 IS NULL OR m.type = ?2)`
+  )
+    .bind(pid, type || null)
+    .first<any>()
   const rows = await c.env.DB.prepare(
     `SELECT m.*, pt.full_name AS teller_name, e.title AS event_title
        FROM memories m
@@ -128,24 +137,37 @@ memoryRoutes.get('/persons/:id/memories', async (c) => {
              OR EXISTS (SELECT 1 FROM memory_persons mp WHERE mp.memory_id = m.id AND mp.person_id = ?1))
         AND m.status = 'APPROVED'
         AND (?2 IS NULL OR m.type = ?2)
-      ORDER BY COALESCE(m.event_date, m.created_at) DESC LIMIT ?3`
+      ORDER BY COALESCE(m.event_date, m.created_at) DESC LIMIT ?3 OFFSET ?4`
   )
-    .bind(pid, type || null, limit)
+    .bind(pid, type || null, page.limit, page.offset)
     .all()
-  return c.json({ memories: rows.results })
+  return c.json({ memories: rows.results, ...paginated(rows.results, totalRow?.n || 0, page) })
 })
 
 // ------------------------ F4: Events & Rashomon view ------------------
 memoryRoutes.get('/events', async (c) => {
+  const page = pageParams(c, 25)
+  const clanId = await resolveClanId(c)
+  const where = clanId ? 'WHERE e.clan_id = ?1 ' : ''
+  const args = clanId ? [clanId] : []
+  const totalRow = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM events e ${where}`)
+    .bind(...args)
+    .first<any>()
   const rows = await c.env.DB.prepare(
     `SELECT e.*,
             (SELECT COUNT(*) FROM memories m WHERE m.event_id = e.id AND m.status='APPROVED') AS memory_count,
             (SELECT COUNT(*) FROM contradictions ct WHERE ct.event_id = e.id AND ct.status='OPEN') AS contradiction_count
        FROM events e
-      ORDER BY e.event_date DESC`
-  ).all<any>()
+       ${where}
+      ORDER BY e.event_date DESC LIMIT ?2 OFFSET ?3`
+  )
+    .bind(...args, page.limit, page.offset)
+    .all<any>()
   const visible = await visibleClanIds(c)
-  return c.json({ events: visible ? rows.results.filter((e) => visible.has(e.clan_id)) : rows.results })
+  return c.json({
+    events: visible ? rows.results.filter((e) => visible.has(e.clan_id)) : rows.results,
+    ...paginated(rows.results, totalRow?.n || 0, page)
+  })
 })
 
 memoryRoutes.post('/events', requireAuth, async (c) => {
@@ -517,13 +539,17 @@ memoryRoutes.delete('/advices/:id', requireAuth, async (c) => {
 
 // ------------------------ Time Capsule (2.3) --------------------------
 memoryRoutes.get('/time-capsules', async (c) => {
+  const page = pageParams(c)
+  const totalRow = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM time_capsules`).first<any>()
   const rows = await c.env.DB.prepare(
     `SELECT t.*, pa.full_name AS author_name, pr.full_name AS recipient_name
        FROM time_capsules t
        LEFT JOIN persons pa ON pa.id = t.author_person_id
        LEFT JOIN persons pr ON pr.id = t.recipient_person_id
-      ORDER BY t.created_at DESC`
-  ).all<any>()
+      ORDER BY t.created_at DESC LIMIT ?1 OFFSET ?2`
+  )
+    .bind(page.limit, page.offset)
+    .all<any>()
   const visible = await visibleClanIds(c)
   const capsulesRaw = visible ? rows.results.filter((t) => visible.has(t.clan_id)) : rows.results
   const now = Date.now()
@@ -541,7 +567,7 @@ memoryRoutes.get('/time-capsules', async (c) => {
           : 0
     }
   })
-  return c.json({ capsules })
+  return c.json({ capsules, ...paginated(capsules, totalRow?.n || 0, page) })
 })
 
 memoryRoutes.post('/time-capsules', requireAuth, async (c) => {

@@ -6,7 +6,7 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { enumProblem, json, paramOf, problem, uuid, yearOf, ageOf } from '../lib/util'
+import { enumProblem, json, pageParams, paginated, paramOf, problem, uuid, yearOf, ageOf } from '../lib/util'
 import { nextAnniversary, solarToLunar, formatLunar } from '../lib/lunar'
 import {
   guardClanView, guardClanWrite, resolveClanId, visibleClanIds
@@ -447,13 +447,19 @@ genealogyRoutes.get('/persons', async (c) => {
   if (!clanId) return c.json(problem(403, 'Forbidden', 'Không có dòng họ nào được phép truy cập.'), 403)
   const q = (c.req.query('q') || '').trim()
   if (!q) {
-    const all = await c.env.DB.prepare(
-      `SELECT id, full_name, birth_date, death_date, is_alive, generation, photo_url
-         FROM persons WHERE clan_id = ? ORDER BY generation, birth_date LIMIT 500`
+    const page = pageParams(c, 50)
+    const totalRow = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM persons WHERE clan_id = ?`
     )
       .bind(clanId)
+      .first<any>()
+    const all = await c.env.DB.prepare(
+      `SELECT id, full_name, birth_date, death_date, is_alive, generation, photo_url
+         FROM persons WHERE clan_id = ?1 ORDER BY generation, birth_date LIMIT ?2 OFFSET ?3`
+    )
+      .bind(clanId, page.limit, page.offset)
       .all()
-    return c.json({ persons: all.results })
+    return c.json({ persons: all.results, ...paginated(all.results, totalRow?.n || 0, page) })
   }
   const like = `%${q}%`
   const rows = await c.env.DB.prepare(

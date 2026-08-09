@@ -183,3 +183,23 @@ export function enumProblem(b: any, field: string, allowed: string[]): string | 
   }
   return null
 }
+
+/** Pagination (4-22): đọc limit/offset an toàn từ query, trả nextOffset nếu còn trang */
+export function pageParams(
+  c: { req: { query: (k: string) => string | undefined } },
+  defaultLimit = 20
+): { limit: number; offset: number } {
+  const raw = c.req.query('limit')
+  const lim = parseInt(raw || '', 10)
+  const limit = Number.isFinite(lim) && lim > 0 ? Math.min(lim, 100) : defaultLimit
+  const offRaw = c.req.query('offset')
+  const off = parseInt(offRaw || '0', 10)
+  const offset = Number.isFinite(off) && off > 0 ? off : 0
+  return { limit, offset }
+}
+
+/** Wrap kết quả list thành payload phân trang chuẩn */
+export function paginated(items: unknown[], total: number, page: { limit: number; offset: number }) {
+  const nextOffset = page.offset + items.length < total ? page.offset + page.limit : null
+  return { items, total, limit: page.limit, offset: page.offset, nextOffset }
+}

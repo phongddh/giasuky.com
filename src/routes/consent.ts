@@ -7,7 +7,7 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { CONSENT_SCOPES } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
-import { enumProblem, json, paramOf, problem, sha256, uuid } from '../lib/util'
+import { enumProblem, json, pageParams, paginated, paramOf, problem, sha256, uuid } from '../lib/util'
 import {
   clanOfPerson, clanOfRestRequest, clanOfWill,
   guardClanView, guardClanWrite, isOpenAccess, visibleClanIds
@@ -484,13 +484,20 @@ consentRoutes.get('/audit-logs', requireAuth, async (c) => {
                   SELECT user_id FROM clan_members WHERE clan_id = ?2)`
     args.push(c.var.user!.id, c.var.user!.clan_id || '')
   }
+  const page = pageParams(c, 50)
+  const n = args.length
+  const totalRow = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM audit_logs a ${scopeSql}`
+  )
+    .bind(...args)
+    .first<any>()
   const rows = await c.env.DB.prepare(
     `SELECT a.*, u.full_name AS actor_name FROM audit_logs a
        LEFT JOIN users u ON u.id = a.actor_user_id
        ${scopeSql}
-      ORDER BY a.created_at DESC LIMIT 200`
+      ORDER BY a.created_at DESC LIMIT ?${n + 1} OFFSET ?${n + 2}`
   )
-    .bind(...args)
+    .bind(...args, page.limit, page.offset)
     .all()
-  return c.json({ logs: rows.results })
+  return c.json({ logs: rows.results, ...paginated(rows.results, totalRow?.n || 0, page) })
 })

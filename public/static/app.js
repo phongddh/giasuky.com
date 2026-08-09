@@ -1007,6 +1007,7 @@ async function viewMemories(host) {
   try {
     const [ev, ct] = await Promise.all([api('/events'), api('/contradictions')])
     MEM.events = ev.events || []
+    MEM.evOffset = ev.nextOffset
     const cts = ct.contradictions || []
     const open = cts.filter((x) => x.status === 'OPEN')
 
@@ -1037,6 +1038,9 @@ async function viewMemories(host) {
               : empty('fa-book-open', 'Chưa có sự kiện nào được ghi lại.',
                   S.user ? '<button class="btn gold" id="mem-new-ev">Tạo sự kiện đầu tiên</button>' : '')}
           </div>
+          ${ev.nextOffset != null
+            ? '<button class="btn ghost w-full mt-2" id="mem-more-ev"><i class="fa-solid fa-angles-down"></i> Xem thêm sự kiện</button>'
+            : ''}
         </div>
 
         <div class="col">
@@ -1069,6 +1073,24 @@ async function viewMemories(host) {
     $('#mem-q') && $('#mem-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') doMemSearch() })
     $('#mem-new') && $('#mem-new').addEventListener('click', () => newMemoryModal())
     $('#mem-new-ev') && $('#mem-new-ev').addEventListener('click', () => newEventModal())
+    $('#mem-more-ev') && $('#mem-more-ev').addEventListener('click', async (btn) => {
+      try {
+        const d = await api('/events?offset=' + (MEM.evOffset ?? 0))
+        MEM.events.push(...(d.events || []))
+        MEM.evOffset = d.nextOffset
+        btn.remove()
+        const box = $('#mem-events')
+        if (box) box.insertAdjacentHTML('beforeend', (d.events || []).map(eventRow).join(''))
+        $$('[data-ev]', box).forEach((el) =>
+          el.addEventListener('click', () => openRashomon(el.getAttribute('data-ev'))))
+        if (d.nextOffset != null && box) {
+          box.insertAdjacentHTML(
+            'afterend',
+            '<button class="btn ghost w-full mt-2" id="mem-more-ev"><i class="fa-solid fa-angles-down"></i> Xem thêm sự kiện</button>')
+          $('#mem-more-ev') && $('#mem-more-ev').addEventListener('click', arguments.callee)
+        }
+      } catch (e) { toastErr(e) }
+    })
     $$('[data-ev]', host).forEach((el) =>
       el.addEventListener('click', () => openRashomon(el.getAttribute('data-ev'))))
     $$('[data-ct]', host).forEach((el) =>
@@ -3089,14 +3111,39 @@ async function showAudit() {
     const logs = d.logs || []
     out.innerHTML = logs.length
       ? `<table class="tbl mt-3"><thead><tr><th>Lúc</th><th>Ai</th><th>Hành động</th><th>Đối tượng</th></tr></thead>
-          <tbody>${logs.slice(0, 60).map((l) => `<tr>
+          <tbody>${logs.map((l) => `<tr>
             <td class="nowrap muted" style="font-size:12px">${fmtDate(l.created_at)}</td>
             <td style="font-size:13px">${esc(l.actor_name || 'hệ thống')}</td>
             <td><code style="font-size:12px">${esc(l.action)}</code></td>
             <td class="muted" style="font-size:12px">${esc(l.target_type || '')} ${esc(String(l.target_id || '').slice(0, 8))}</td>
           </tr>`).join('')}</tbody></table>
-         <div class="muted mt-2" style="font-size:12px">Hiển thị ${Math.min(60, logs.length)}/${logs.length} bản ghi gần nhất.</div>`
+         <div class="muted mt-2" style="font-size:12px">Hiển thị ${logs.length} bản ghi${d.total ? ' / tổng ' + d.total : ''}${d.nextOffset != null ? ' (đang tải tiếp…)' : ''}.</div>
+         ${d.nextOffset != null
+           ? '<button class="btn ghost mt-3" id="aud-more"><i class="fa-solid fa-angles-down"></i> Xem thêm</button>'
+           : ''}`
       : '<div class="muted mt-3" style="font-size:14px">Chưa có nhật ký.</div>'
+    $('#aud-more') && $('#aud-more').addEventListener('click', async (btn) => {
+      try {
+        const n = await api('/audit-logs?offset=' + (parseInt(d.offset || '0', 10) + parseInt(d.limit || '50', 10)))
+        const rows = n.logs || []
+        const tbody = out.querySelector('tbody')
+        if (tbody) tbody.insertAdjacentHTML('beforeend', rows.map((l) => `<tr>
+            <td class="nowrap muted" style="font-size:12px">${fmtDate(l.created_at)}</td>
+            <td style="font-size:13px">${esc(l.actor_name || 'hệ thống')}</td>
+            <td><code style="font-size:12px">${esc(l.action)}</code></td>
+            <td class="muted" style="font-size:12px">${esc(l.target_type || '')} ${esc(String(l.target_id || '').slice(0, 8))}</td>
+          </tr>`).join(''))
+        btn.remove()
+        if (n.nextOffset != null) {
+          out.insertAdjacentHTML('beforeend',
+            '<button class="btn ghost mt-3" id="aud-more"><i class="fa-solid fa-angles-down"></i> Xem thêm</button>')
+          $('#aud-more').addEventListener('click', arguments.callee)
+        } else {
+          const note = out.querySelector('.muted.mt-2')
+          if (note) note.textContent = note.textContent.replace(' (đang tải tiếp…)', '')
+        }
+      } catch (e) { toastErr(e) }
+    })
   } catch (e) { out.innerHTML = errBox(e) }
 }
 

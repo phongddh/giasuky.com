@@ -149,15 +149,15 @@
 ## Giai đoạn 4 — Vận hành sản xuất
 
 ### 4-21. Tests tự động — vitest + miniflare (D1 local)
-- **Nội dung**: setup vitest + `@cloudflare/vitest-pool-workers` (hoặc miniflare trực tiếp); phủ: guard clan (dev + strict), rate limit, consent verify, HARD_DELETE, cascade DELETE, citation parser, lunar convert, access.ts helpers.
-- **Done**: `npm test` chạy xanh; phủ các case P1 đã sửa.
-- Trạng thái: `- [ ]`
+- **Nội dung**: setup vitest + `@cloudflare/vitest-pool-workers`; phủ: guard clan (dev + strict), rate limit, consent verify, HARD_DELETE, cascade DELETE, citation parser, injection scan, enumProblem, pagination, lunar convert.
+- **Done**: `npm test` chạy xanh — 18/18; phủ các case P1 đã sửa.
+- Trạng thái: `- [x]`
 
 ### 4-22. Pagination chuẩn
-- **Vị trí**: persons, memories, events, audit-logs, advices, time-capsules (hiện LIMIT cứng 20-500).
-- **Nội dung**: `?limit=&cursor=` (hoặc offset) + trả `nextCursor`; frontend nút "xem thêm".
-- **Done**: list > page size lật được hết dữ liệu.
-- Trạng thái: `- [ ]`
+- **Vị trí**: persons, memories, events, audit-logs, advices (grouped scroll), time-capsules.
+- **Nội dung**: `?limit=&offset=` + trả `total`/`nextOffset`; frontend nút "Xem thêm" (events, audit-logs).
+- **Done**: list > page size lật được hết dữ liệu (events 2/6, persons 3/15, capsules 1/3, memories 2/6, audit 3/67 smoke-tested).
+- Trạng thái: `- [x]`
 
 ### 4-23. Observability
 - **Nội dung**: structured log chuẩn JSON cho onError + các event quan trọng (đã có audit_logs); thêm requestId header; đưa version/deploy vào /api/health (đã có appEnv).
