@@ -171,8 +171,8 @@
 
 ### 4-25. CI/CD GitHub Actions
 - **Nội dung**: workflow: `npm ci` → `tsc --noEmit` → `npm test` → `vite build` → `wrangler pages deploy` (cần secrets: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID; chỉ chạy khi push main).
-- **Done**: push main → deploy tự động (cần user cấp token).
-- Trạng thái: `- [ ]`
+- **Done**: `.github/workflows/deploy.yml` (job test chạy mọi push/PR; job deploy chỉ khi push main, cần user cấp 2 secrets).
+- Trạng thái: `- [x]`
 
 ---
 
