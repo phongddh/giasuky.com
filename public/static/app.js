@@ -2950,6 +2950,7 @@ async function consentModal(personId, personName) {
           <dt>Mã bản ghi</dt><dd><code>${esc(r.id)}</code></dd>
           <dt>Mã băm SHA-256</dt><dd><code style="word-break:break-all">${esc(r.recordHash)}</code></dd>
           <dt>Mã công chứng số</dt><dd><code style="word-break:break-all">${esc(r.blockchainTxHash)}</code></dd>
+          <dt>Chuỗi khối</dt><dd>${esc(r.chain || 'mock-ledger')}${r.chain && r.chain !== 'mock-ledger' ? ` · <a href="${esc(r.explorerUrl || '')}" target="_blank" rel="noopener">Xem trên explorer <i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : ' · <span class="badge warn">notary nội bộ (mock)</span>'}</dd>
           <dt>Trạng thái</dt><dd><span class="badge green">còn hiệu lực</span></dd>
         </dl>
         <div class="alert ok mt-3" style="font-size:13px">
@@ -2980,6 +2981,7 @@ async function verifyConsent(id) {
         <dt>Mã băm đã lưu</dt><dd><code style="word-break:break-all">${esc(v.storedHash || '')}</code></dd>
         <dt>Băm lại hiện tại</dt><dd><code style="word-break:break-all">${esc(v.recomputedHash || '')}</code></dd>
         <dt>Mạng công chứng</dt><dd>${esc(v.blockchain ? v.blockchain.network : '')}</dd>
+        <dt>Chuỗi khối</dt><dd>${esc(v.blockchain ? v.blockchain.chain : '')}${v.blockchain && v.blockchain.chain !== 'mock-ledger' ? ` · <a href="${esc(v.blockchain.explorerUrl)}" target="_blank" rel="noopener">Xem trên explorer <i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : ' · <span class="badge warn">notary nội bộ (mock)</span>'}</dd>
         <dt>Địa chỉ hợp đồng</dt><dd><code>${esc(v.blockchain ? v.blockchain.contractAddress : '')}</code></dd>
         <dt>Chứa dữ liệu cá nhân?</dt><dd><span class="badge green">Không</span></dd>
       </dl>

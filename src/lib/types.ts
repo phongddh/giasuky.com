@@ -9,6 +9,10 @@ export type Bindings = {
   ALLOWED_ORIGINS?: string
   /** Phiên bản build, trả trong /api/health */
   APP_VERSION?: string
+  /** GĐ5-30 Blockchain notary: cần đủ RPC + key mới ký chain thật; thiếu → mock-ledger */
+  BLOCKCHAIN_RPC_URL?: string
+  BLOCKCHAIN_PRIVATE_KEY?: string
+  BLOCKCHAIN_CHAIN?: string
 }
 
 export type SessionUser = {

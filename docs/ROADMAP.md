@@ -201,10 +201,11 @@
 - **Cần**: đối tác lab (23andMe/MyHeritage API), consent riêng, module nhập liệu + hiển thị quan hệ.
 - Trạng thái: `- [ ]`
 
-### 5-30. Blockchain notary thật
-- **Hiện trạng**: hash on-DB (MVP ghi chú).
-- **Cần**: ghi `sha256(payload)` lên chain chi phí thấp (Stellar/Ethereum L2); giữ on-DB làm fallback; UI hiển thị tx hash + explorer link.
-- Trạng thái: `- [ ]`
+### 5-30. Blockchain notary — adapter + UI explorer (chain thật cần key)
+- **Đã làm (in-repo)**: `src/lib/notary.ts` adapter — `anchorConsent(env, hash)`; đủ `BLOCKCHAIN_RPC_URL`+`BLOCKCHAIN_PRIVATE_KEY` (+`BLOCKCHAIN_CHAIN` stellar|evm-l2) → ký qua RPC (`POST {rpc}/anchor`); thiếu → mock-ledger (txHash hex, minh bạch trên UI). Migration `0003_notary_chain.sql`; POST /consent trả `chain`+`explorerUrl`; verify trả blockchain.explorerUrl; UI link "Xem trên explorer" + badge mock khi chưa có chain thật.
+- **Contract chain thật (ngoài repo)**: service nhận `{payloadHash, chain, signer}` → tạo tx ghi hash (không PII, 4.7.1) → trả `{txHash}`; explorer map: stellar → stellar.expert, evm-l2 → explorer.public.zkevm.test.net. Đặt 2 secrets + deploy worker là xong, không đổi code.
+- **Test**: vitest 22/22 (mock fallback, RPC path với fetch mock, explorerUrl map); smoke: POST→verify `verified:True`, chain mock-ledger, explorerUrl trả về.
+- Trạng thái: `- [x]` (phần in-repo xong; ký chain thật cần key + worker ngoài)
 
 ---
 

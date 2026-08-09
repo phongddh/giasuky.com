@@ -7,6 +7,7 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { CONSENT_SCOPES } from '../lib/types'
 import { audit, requireAuth } from '../lib/auth'
+import { anchorConsent, explorerUrlOf } from '../lib/notary'
 import { enumProblem, json, pageParams, paginated, paramOf, problem, sha256, uuid } from '../lib/util'
 import {
   clanOfPerson, clanOfRestRequest, clanOfWill,
@@ -127,14 +128,15 @@ consentRoutes.post('/consent', requireAuth, async (c) => {
   }
   // blockchainProof: chỉ hash bản ghi, KHÔNG lưu PII lên chain (4.7.1)
   const recordHash = await sha256(JSON.stringify(payload))
-  const txHash = '0x' + recordHash.slice(0, 64)
+  const anchor = await anchorConsent(c.env, recordHash)
+  const txHash = anchor.txHash
 
   await c.env.DB.prepare(
     `INSERT INTO consent_records (id, subject_person_id, scope, grantees, time_start, time_end,
        auto_sunset_config, right_to_rest, signature_method, signed_at, signer_ip,
        signer_device_fingerprint, video_consent_url, blockchain_tx_hash,
-       blockchain_contract_address, record_hash, status)
-     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,datetime('now'),?10,?11,?12,?13,?14,?15,'active')`
+       blockchain_contract_address, record_hash, notary_chain, status)
+     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,datetime('now'),?10,?11,?12,?13,?14,?15,?16,'active')`
   )
     .bind(
       id,
@@ -153,7 +155,8 @@ consentRoutes.post('/consent', requireAuth, async (c) => {
       b.videoConsentUrl || null,
       txHash,
       '0xGiaSuKyConsentLedgerV1',
-      recordHash
+      recordHash,
+      anchor.chain
     )
     .run()
 
@@ -162,7 +165,14 @@ consentRoutes.post('/consent', requireAuth, async (c) => {
     scope: payload.scope,
     method
   })
-  return c.json({ id, recordHash, blockchainTxHash: txHash, status: 'active' })
+  return c.json({
+    id,
+    recordHash,
+    blockchainTxHash: txHash,
+    chain: anchor.chain,
+    explorerUrl: anchor.explorerUrl,
+    status: 'active'
+  })
 })
 
 /** 11.5.4 Revoke → mọi AI feature liên quan bị disable (AC: <5 phút; ở đây tức thời) */
@@ -238,6 +248,8 @@ consentRoutes.get('/consent/:id/verify', async (c) => {
     blockchain: {
       txHash: r.blockchain_tx_hash,
       contractAddress: r.blockchain_contract_address,
+      chain: r.notary_chain || 'mock-ledger',
+      explorerUrl: explorerUrlOf(r.notary_chain || 'mock-ledger', r.blockchain_tx_hash),
       network: 'polygon-zkevm (MVP: notary nội bộ)',
       containsPII: false
     }

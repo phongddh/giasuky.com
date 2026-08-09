@@ -5,6 +5,7 @@ import { postProcessPersona, scanInput, checkRateLimit } from '../src/lib/ai'
 import { isOpenAccess } from '../src/lib/access'
 import { enumProblem, removeTone, uuid } from '../src/lib/util'
 import { solarToLunar } from '../src/lib/lunar'
+import { anchorConsent, explorerUrlOf } from '../src/lib/notary'
 
 const ORIGIN = 'https://giasuky.com'
 
@@ -101,6 +102,43 @@ describe('unit — lunar + removeTone', () => {
     const l = solarToLunar(1, 1, 2025)
     expect(l.day).toBeGreaterThan(0)
     expect(l.day).toBeLessThanOrEqual(30)
+  })
+})
+
+describe('unit — notary adapter (5-30)', () => {
+  test('không có RPC/key → mock-ledger, txHash hex, explorerUrl nội bộ', async () => {
+    const a = await anchorConsent({} as any, 'a'.repeat(64))
+    expect(a.chain).toBe('mock-ledger')
+    expect(a.txHash).toMatch(/^0x[0-9a-f]{64}$/)
+    expect(a.explorerUrl).toContain('/consent/verify')
+  })
+
+  test('có RPC → gọi fetch tới /anchor và trả explorerUrl theo chain', async () => {
+    const calls: Array<{ url: string; body: any }> = []
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async (url: any, init?: any) => {
+      calls.push({ url: String(url), body: JSON.parse(init?.body || '{}') })
+      return new Response(JSON.stringify({ txHash: '0x1234' }), { status: 200 })
+    }) as any
+    try {
+      const a = await anchorConsent(
+        { BLOCKCHAIN_RPC_URL: 'https://rpc.example', BLOCKCHAIN_PRIVATE_KEY: 'k', BLOCKCHAIN_CHAIN: 'stellar' } as any,
+        'b'.repeat(64)
+      )
+      expect(calls.length).toBe(1)
+      expect(calls[0].url).toBe('https://rpc.example/anchor')
+      expect(calls[0].body.payloadHash).toBe('b'.repeat(64))
+      expect(calls[0].body.chain).toBe('stellar')
+      expect(a.txHash).toBe('0x1234')
+      expect(a.explorerUrl).toContain('stellar.expert')
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  test('explorerUrlOf map đúng chain', () => {
+    expect(explorerUrlOf('evm-l2', '0xabc')).toContain('explorer')
+    expect(explorerUrlOf('mock-ledger', '0xabc')).toContain('/consent/verify')
   })
 })
 
