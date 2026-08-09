@@ -192,10 +192,15 @@
 - **Test**: vitest 23/23 (422 không consent → 200 mock synthesize/clone, 400 thiếu audioUrl); smoke: 422 → consent → mock true.
 - Trạng thái: `- [x]` (in-repo xong; tổng hợp giọng thật cần key provider)
 
-### 5-28. Video call thật (SFU mediasoup)
-- **Hiện trạng**: polling thay (README:262).
-- **Cần**: server mediasoup riêng + WebRTC; repo này giữ giao thức signalling + UI; thay cơ chế poll.
-- Trạng thái: `- [ ]`
+### 5-28. Video call thật (SFU mediasoup) — contract signalling (server ngoài)
+- **Hiện trạng (giữ nguyên)**: đồng bộ nghi lễ qua `poll-sync` 500ms (D1 cursor, `GET /rituals/:id/stream`, payload `{cursor, events, user_id}` — client dedupe bằng `ALTAR.seen`/`RIT.seen`, skip event của chính mình). `GET /rituals/:id` trả `transport: {mode:'poll-sync', audioOnlyFallback:true}`.
+- **Contract thay poll (cần server ngoài: mediasoup SFU multi-region + Redis pub/sub + WebSocket gateway)**:
+  1. `POST /api/v1/rituals/:id/rtc-token` (auth, clan member) → `{token, sfuUrl}` — thay thế cơ chế cursor; token TTL 24h, chứa ritual_id + user_id + clan_id.
+  2. Client WebSocket: `ws://sfu/rituals/:id?token=` — nhận event `{type:'incense'|'flower'|'offering'|'candle'|'prayer', userId, payload, ts}` (Redis pub/sub fan-out).
+  3. Media: offer/answer/ICE exchange qua SFU (worker-role + audience viewer) — mediasoup SFU quản lý các transport; repo này không chứa code media.
+  4. Fallback: khi SFU không reachable → client tự quay lại `poll-sync` (giữ code hiện tại làm đường dự phòng, đúng tiêu chí AC-F1.2 dự phòng).
+  - **Yêu cầu hạ tầng**: server riêng (không chạy trên Cloudflare Workers), trỏ `SFU_URL` qua secret cho frontend.
+- **Trạng thái**: `- [ ]` (contract đã định nghĩa; triển khai khi có server riêng)
 
 ### 5-29. DNA lab — module nhập liệu + quan hệ ước tính (đối tác lab ngoài)
 - **Đã làm (in-repo)**: scope consent mới `dna_processing` (CRITICAL, hiện trong /consent/scopes + UI); migration `0004_dna_profiles.sql`; endpoints `POST/GET /persons/:id/dna`, `POST /persons/:id/dna/matches`, `PATCH /persons/:id/dna` (status APPROVED/REJECTED, enum chuẩn) — tất cả consent-gated (422 nếu thiếu) + clan guard + audit + payload sanitize (provider whitelist, matches ≤ 200); UI section DNA trong drawer người (haplogroup, thanh nguồn gốc dân tộc, danh sách quan hệ ước tính) + modal nhập hồ sơ.

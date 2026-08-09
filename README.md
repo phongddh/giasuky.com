@@ -270,7 +270,7 @@ Lịch đề xuất: backup local trước mỗi đợt thay đổi schema; back
 - [ ] **LLM key hiện hết hạn** (401) — cần nạp lại key để dùng đầy đủ AI (fallback vẫn an toàn).
 - [ ] Deploy production lên Cloudflare Pages + bind D1 thật.
 - [ ] Clone giọng nói / phục dựng ảnh bằng AI thật (hiện là stub, đúng theo giới hạn edge runtime).
-- [ ] Video call nghi lễ (mediasoup SFU) — cần server riêng, không khả thi trên Workers.
+- [ ] Video call nghi lễ (mediasoup SFU) — contract signalling đã định nghĩa trong ROADMAP 5-28; cần server riêng (không chạy trên Workers), client giữ poll-sync làm fallback.
 - [ ] Tích hợp DNA lab & đối sánh quan hệ sinh học.
 - [ ] Test tự động (unit / e2e) — hiện chỉ có smoke test bằng `curl`.
 - [ ] Deploy production: set `APP_ENV=production` + kiểm tra quyền truy cập theo thành viên dòng họ (đã triển khai code, cần verify trên môi trường thật).
